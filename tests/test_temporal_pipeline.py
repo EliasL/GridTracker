@@ -7,7 +7,8 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from reference_editor import file_hash, label_node, save_reference
+from session_data import file_hash, label_node
+from session_data import save_reference
 from run_temporal import propagate
 
 

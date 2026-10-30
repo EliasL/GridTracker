@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 import re
 import time
+from session_data import write_json, file_hash, parse_fps, validate_reference, load_reference
+
 
 _DEFAULT_FPS = object()
 
@@ -46,15 +48,8 @@ def discover_frames(folder, order='download', output=None):
     return files, offsets
 
 
-def write_json(path, data):
-    path = Path(path)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(data, indent=2, allow_nan=False)+'\n')
-    temporary.replace(path)
-
-
 def detection_signature():
-    names = ('pipeline', 'gridtracker', 'compare_crossing_inputs', 'crossing_nodes', 'scan_node_lines',
+    names = ('pipeline', 'detection', 'string_color', 'crossing_nodes', 'scan_node_lines',
              'local_peak_spacing', 'edge_nodes', 'complete_edge_nodes', 'local_node_deviations')
     return hashlib.sha256(b''.join(Path(__file__).with_name(n+'.py').read_bytes() for n in names)).hexdigest()
 
@@ -64,11 +59,10 @@ def propagate(results, reference, output, fps=_DEFAULT_FPS, method='flow', confi
     from copy import deepcopy
     import numpy as np
     from PIL import Image, ImageOps
-    from compare_crossing_inputs import color_model_grayscale
+    from string_color import color_model_grayscale
     from fit_bezier_curves import fit_labeled_curves
     from temporal_tracking import NodeTracker, TrackingConfig, reconcile_nodes, hold_missing_positions, TRACKING_POLICY_VERSION
     from tracking_review import save_overview
-    from reference_editor import validate_reference, file_hash, parse_fps
 
     if not results or [r['frame'] for r in results] != list(range(len(results))):
         raise ValueError('Require a complete ordered frame sequence starting at zero')
@@ -203,7 +197,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('folder', type=Path, nargs='?', help='Folder of image frames')
     parser.add_argument('--input', type=Path, help='Alternative to the positional folder')
-    parser.add_argument('--output', type=Path, help='Default: output/<folder name>, or output/temporal for the legacy command')
+    parser.add_argument('--output', type=Path, help='Default: <frames folder>/gridtracker_results')
     parser.add_argument('--order', choices=('download', 'filename'), default='download')
     parser.add_argument('--diagnostics', action='store_true', help='Also save the detailed detector plots and arrays')
     parser.add_argument('--workers', type=int, default=min(4, os.cpu_count() or 1))
@@ -216,7 +210,7 @@ def main(argv=None):
     if args.folder is not None and args.input is not None:
         parser.error('Specify the folder once, either positionally or with --input')
     args.input = args.folder or args.input or Path('testData')
-    args.output = args.output or Path(__file__).parent/'output'/(args.folder.name if args.folder is not None else 'temporal')
+    args.output = args.output or args.input/'gridtracker_results'
     if args.workers < 1 or (args.fps is not None and not 0 < args.fps < float('inf')):
         parser.error('Require positive worker count and a finite positive frame sampling rate')
     files, offsets = discover_frames(args.input, args.order, args.output)
@@ -224,7 +218,7 @@ def main(argv=None):
     print(f'{len(files)} frames; {gaps} missing numbered frames; output: {args.output.resolve()}', flush=True)
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    from reference_editor import ReferenceEditor, configure_backend, file_hash, load_reference
+    from reference_editor import ReferenceEditor, configure_backend
     signature = detection_signature()
     results, futures, errors = {}, {}, []
     manifest = dict(sources=[str(p) for p in files], workers=args.workers, threads_per_worker=1,

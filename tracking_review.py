@@ -6,7 +6,8 @@ from PIL import Image, ImageEnhance, ImageOps
 from fit_bezier_curves import bezier_basis, node_available
 from mesh_hints import missing_crossings
 
-from node_editor import NODE_COLORS, NodeEditor, node_geometry
+from node_editor import NODE_COLORS, NodeEditor
+from session_data import node_geometry, load_ui_state, parse_fps, save_reference
 
 COLORS = NODE_COLORS
 
@@ -70,7 +71,6 @@ class TrackingReview:
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
         from plot_widgets import Button, CheckButtons, Slider, TextBox
-        from reference_editor import load_ui_state
         from help_panel import HelpPanel
         self.session, self._report, self.editor = session, report, None
         self.mode, self.calibration_panel = 'review', None
@@ -236,7 +236,6 @@ class TrackingReview:
         self.draw()
 
     def confirm(self, event=None):
-        from reference_editor import save_reference, parse_fps
         if self.session is None or self.mode != 'review':
             return
         index = self.state['frame']
@@ -265,7 +264,6 @@ class TrackingReview:
         self.reanalyze(frame_range=(first, last))
 
     def reanalyze(self, event=None, *, frame_range=None):
-        from reference_editor import parse_fps
         from plot_widgets import paused_widgets
         if self.session is None or self.mode != 'review':
             return
@@ -312,7 +310,6 @@ class TrackingReview:
             self.draw()
 
     def export(self, event=None):
-        from reference_editor import parse_fps
         if self.session is None or self.mode != 'review':
             return
         self.editor.autosave()

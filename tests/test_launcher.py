@@ -21,13 +21,18 @@ class LauncherTests(unittest.TestCase):
     def test_output_follows_input_until_separate_destination_selected(self):
         chooser = self.chooser(source='/chosen/frames')
         chooser.update_output()
-        chooser.output.set.assert_called_once_with('/chosen/frames')
+        chooser.output.set.assert_called_once_with('/chosen/frames/gridtracker_results')
         chooser.output_entry.configure.assert_called_with(state='disabled')
         chooser.output.set.reset_mock()
         chooser.same_folder.get.return_value = False
         chooser.update_output()
         chooser.output.set.assert_not_called()
         chooser.output_browse.configure.assert_called_with(state='normal')
+
+    def test_blank_input_keeps_output_blank(self):
+        chooser = self.chooser()
+        chooser.update_output()
+        chooser.output.set.assert_called_once_with('')
 
     def test_start_validates_input_and_accepts_new_output_folder(self):
         with TemporaryDirectory() as directory:

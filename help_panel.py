@@ -3,7 +3,7 @@ HELP_TEXT = (
     'EDIT NODES\n'
     'Drag a node to move it. Right-click or Delete removes it.\n'
     'With the pointer over the image: a adds a crossing; e adds an edge node.\n'
-    'u undoes; [ / ] changes the column; , / . changes the row.\n'
+    'Cmd-Z / Ctrl-Z, z, or u undoes; [ / ] changes column; , / . changes row.\n'
     'Use the toolbar to zoom or pan; deselect it to move nodes again.\n\n'
     'FRAMES AND SAVING\n'
     'The slider or left/right arrows changes frame. Edits autosave as drafts.\n'

@@ -8,7 +8,8 @@ import unittest
 
 import numpy as np
 
-from reference_editor import label_node, save_reference
+from session_data import label_node
+from session_data import save_reference
 from review_session import ReviewSession, update_kinematics
 from test_temporal_pipeline import make_sequence
 

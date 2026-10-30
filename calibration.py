@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
+from session_data import write_json
 
 UNITS = {'mm': 1e-3, 'cm': 1e-2, 'm': 1., 'µm': 1e-6, 'in': .0254}
 
@@ -167,7 +168,6 @@ class CalibrationPanel:
         document.update(image=str(image_path.resolve()), source_image=str(self.image_path.resolve()),
                         image_sha256=hashlib.sha256(image_path.read_bytes()).hexdigest(),
                         applied_at=datetime.now(timezone.utc).isoformat())
-        from run_temporal import write_json
         write_json(self.output/'calibration.json', document)
         self.finish(document)
 

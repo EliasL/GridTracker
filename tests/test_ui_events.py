@@ -69,6 +69,36 @@ class MouseEventTests(unittest.TestCase):
         self.assertTrue(viewer.editor.active)
         click(viewer.fig, viewer.buttons['Confirm frame'].ax)
 
+    def test_undo_shortcuts_restore_and_autosave_node_edits(self):
+        viewer = self.viewer
+        editor = viewer.editor
+        x, y = editor.ax.transAxes.transform((.5, .5))
+        def key(name):
+            viewer.fig.canvas.callbacks.process(
+                'key_press_event', KeyEvent('key_press_event', viewer.fig.canvas, name, x, y))
+        original = [dict(n) for n in editor.nodes]
+        for shortcut in ('cmd+z', 'ctrl+z', 'super+z', 'z', 'u'):
+            with self.subTest(shortcut=shortcut):
+                editor.selected = 0
+                key('delete')
+                self.assertEqual(len(editor.nodes), len(original)-1)
+                key(shortcut)
+                self.assertEqual(editor.nodes, original)
+                from session_data import load_draft
+                saved = load_draft(editor.draft_path, editor.result)
+                self.assertEqual(saved['nodes'], original)
+                self.assertNotIn(1, self.session.anchors)
+        editor.selected = 0
+        key('delete')
+        removed = [dict(n) for n in editor.nodes]
+        click(viewer.fig, editor.fps_box.ax)
+        key('cmd+z')
+        key('z')
+        self.assertEqual(editor.nodes, removed)
+        editor.fps_box.stop_typing()
+        key('z')
+        self.assertEqual(editor.nodes, original)
+
     def test_hidden_slider_does_not_grab_clicks_in_calibration(self):
         viewer = self.viewer
         click(viewer.fig, viewer.buttons['Calibrate length'].ax)

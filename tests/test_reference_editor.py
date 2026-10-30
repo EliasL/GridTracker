@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from reference_editor import ReferenceEditor, label_node, load_reference, save_reference, validate_nodes, load_ui_state
+from session_data import label_node, validate_nodes
+from session_data import load_reference, save_reference, load_ui_state
+from reference_editor import ReferenceEditor
 
 
 class ReferenceTests(unittest.TestCase):
@@ -69,7 +71,7 @@ class ReferenceTests(unittest.TestCase):
             self.assertEqual(len(editor.nodes), 2)
             editor.key(SimpleNamespace(key='delete'))
             self.assertEqual(len(editor.nodes), 1)
-            editor.key(SimpleNamespace(key='u'))
+            editor.key(SimpleNamespace(key='cmd+z'))
             self.assertEqual(len(editor.nodes), 2)
             editor.close(None)
             self.assertFalse(editor.path.exists())

@@ -1,7 +1,7 @@
 import unittest
 
 from mesh_hints import label_from_mesh, missing_crossings
-from reference_editor import validate_nodes
+from session_data import validate_nodes
 
 
 def mesh():

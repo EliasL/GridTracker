@@ -25,7 +25,7 @@ class EdgeTests(unittest.TestCase):
             field = np.maximum(field,np.exp(-.5*((xx-x)/(4/2.35482))**2))
         for y in (20,60,100):
             field = np.maximum(field,np.exp(-.5*((yy-y)/(4/2.35482))**2))
-        _, nodes, _, _, _ = detect_edges(field,4,threshold=.2)
+        _, nodes, _, _ = detect_edges(field,4)
         self.assertEqual(len(nodes),14)
         for node in nodes:
             if node['side'] in ('top','bottom'):

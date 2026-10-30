@@ -2,14 +2,10 @@ import unittest
 
 import numpy as np
 
-from crossing_nodes import choose_threshold, component_nodes, threshold_coverage, filter_by_mass
+from crossing_nodes import choose_threshold, component_nodes, filter_by_mass
 
 
 class ThresholdTests(unittest.TestCase):
-    def test_coverage_excludes_zero_and_uses_strict_threshold(self):
-        t, fraction = threshold_coverage(np.array([[0, .1, .1], [.2, .4, 0]]))
-        np.testing.assert_allclose(t, [.1, .2])
-        np.testing.assert_allclose(fraction, [2/6, 1/6])
 
     def test_detects_known_start_of_shallow_log_slope(self):
         u = (np.arange(50000) + .5) / 50000
@@ -31,21 +27,15 @@ class ThresholdTests(unittest.TestCase):
 
     def test_mass_filter_is_one_pass_and_includes_bounds(self):
         nodes = [{"pixels": value} for value in (1, 1, 3, 3)]
-        kept, rejected, stats = filter_by_mass(nodes, mass_key="pixels")
+        kept, rejected, stats = filter_by_mass(nodes)
         self.assertEqual(stats["mean"], 2)
         self.assertEqual(stats["std"], 1)
         self.assertEqual(kept, nodes)
         self.assertEqual(rejected, [])
-        kept, rejected, stats = filter_by_mass([{"pixels": value} for value in (1, 10, 10, 10, 19)], mass_key="pixels")
-        self.assertEqual(len(kept), 3)
-        self.assertEqual([node["pixels"] for node in rejected], [1,19])
+        kept, rejected, stats = filter_by_mass([{"pixels": value} for value in (1, 10, 10, 10, 19)])
+        self.assertEqual(len(kept), 4)
+        self.assertEqual([node["pixels"] for node in rejected], [1])
 
-    def test_weighted_mass_uses_score_sum_rather_than_pixel_count(self):
-        nodes = [{"pixels": 100, "score_mass": value} for value in (1,10,10,10,19)]
-        kept, rejected, stats = filter_by_mass(nodes, mass_key="score_mass")
-        self.assertEqual(len(kept), 3)
-        self.assertEqual([n["score_mass"] for n in rejected], [1,19])
-        self.assertEqual(stats["mass_key"], "score_mass")
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from session_data import validate_nodes
 
 cv2.setNumThreads(1)
 cv2.ocl.setUseOpenCL(False)
@@ -88,7 +89,6 @@ class NodeTracker:
         self.size = np.array(image.shape[::-1])
         if image.dtype != np.uint8 or image.ndim != 2 or not nodes:
             raise ValueError('Require verified nodes and a uint8 grayscale reference image')
-        from reference_editor import validate_nodes
         validate_nodes(nodes, self.size.tolist(), require_crossing=False)
         self.radius = max(4, int(np.ceil(1.5*width)))
         self.gate = min(3*width, self.config.gate_fraction*spacing)
@@ -112,7 +112,6 @@ class NodeTracker:
 
     def anchor(self, nodes, image, dt=None):
         """Apply exact human positions; absent identities remain recoverable."""
-        from reference_editor import validate_nodes
         validate_nodes(nodes, self.size.tolist(), require_crossing=False)
         if image.shape != self.previous_image.shape or image.dtype != np.uint8:
             raise ValueError('Anchor dimensions or image type changed')

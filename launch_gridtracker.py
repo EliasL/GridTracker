@@ -17,7 +17,7 @@ class FolderChooser:
         ttk.Label(root, text='Folder of image frames').grid(row=0, column=0, padx=12, pady=12, sticky='w')
         ttk.Entry(root, textvariable=self.input).grid(row=0, column=1, sticky='ew')
         ttk.Button(root, text='Browse…', command=self.choose_input).grid(row=0, column=2, padx=12)
-        ttk.Checkbutton(root, text='Save results in the same folder', variable=self.same_folder,
+        ttk.Checkbutton(root, text='Save results in a subfolder of the frames folder', variable=self.same_folder,
                         command=self.update_output).grid(row=1, column=1, pady=4, sticky='w')
         ttk.Label(root, text='Results folder').grid(row=2, column=0, padx=12, pady=12, sticky='w')
         self.output_entry = ttk.Entry(root, textvariable=self.output)
@@ -31,7 +31,8 @@ class FolderChooser:
     def update_output(self):
         same = self.same_folder.get()
         if same:
-            self.output.set(self.input.get())
+            source = self.input.get().strip()
+            self.output.set(str(Path(source)/'gridtracker_results') if source else '')
         for widget in (self.output_entry, self.output_browse):
             widget.configure(state='disabled' if same else 'normal')
 

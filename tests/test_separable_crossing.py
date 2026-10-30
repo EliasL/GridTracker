@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 from scipy.ndimage import correlate,gaussian_filter
-from gridtracker import crossing_evidence
+from detection import crossing_evidence
 
 
 class SeparableCrossingTests(unittest.TestCase):

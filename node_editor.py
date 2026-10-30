@@ -1,33 +1,19 @@
 """Shared node editing, overlays, and durable drafts for both application views."""
 from copy import deepcopy
-import json
 from pathlib import Path
 
 import numpy as np
 from matplotlib.markers import MarkerStyle
+from session_data import node_geometry, load_draft, label_node, parse_fps, save_reference, save_ui_state
 
 NODE_COLORS = dict(verified='white', observed='lime', recovered='cyan', held='gold',
                    predicted='orange', lost='red', outside='red', draft='deepskyblue')
-GEOMETRY_FIELDS = ('x', 'y', 'row', 'column', 'kind', 'side', 'scan_axes')
-
-
-def node_geometry(nodes):
-    return {n['id']: {k: n.get(k) for k in GEOMETRY_FIELDS} for n in nodes}
-
-
-def load_draft(path, result):
-    from reference_editor import file_hash, analysis_hash
-    document = json.loads(Path(path).read_text())
-    if document['source_sha256'] != file_hash(result['source']) or document['analysis_sha256'] != analysis_hash(result):
-        raise ValueError('Saved editing draft belongs to different image pixels or detection results')
-    return document
 
 
 class NodeEditor:
     def __init__(self, result, path, fig, ax, fps_box, *, nodes=None, roster=None,
                  next_id=None, fps=None, frame=0, output=None, poll=None,
                  on_redraw=None, review=False, restore_fps=True):
-        from reference_editor import label_node
         self.result, self.path = result, Path(path)
         self.fig, self.ax, self.fps_box = fig, ax, fps_box
         self.frame, self.fps, self.active = frame, fps, True
@@ -76,7 +62,6 @@ class NodeEditor:
         self.timer.start()
 
     def autosave(self):
-        from reference_editor import parse_fps, save_reference, save_ui_state
         if self.approved is not None:
             return
         try:
@@ -199,8 +184,9 @@ class NodeEditor:
         if event.key in ('i', 'h'):
             name = 'show_labels' if event.key == 'i' else 'show_candidates'
             setattr(self, name, not getattr(self, name))
-        elif event.key == 'u' and self.history:
+        elif event.key in ('u', 'z', 'cmd+z', 'super+z', 'ctrl+z') and self.history:
             self.nodes, self.selected = self.history.pop(), None
+            self.dragging = False
         elif event.key in ('delete', 'backspace') and self.selected is not None:
             self.history.append(deepcopy(self.nodes))
             self.nodes.pop(self.selected)

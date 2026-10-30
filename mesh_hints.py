@@ -1,5 +1,6 @@
 """Advisory missing crossings inferred from the current boundary endpoints."""
 import numpy as np
+from session_data import label_node
 
 
 def identity(node):
@@ -51,7 +52,6 @@ def missing_crossings(nodes, size, width):
 
 def label_from_mesh(node, nodes, result):
     """Reuse a nearby string identity, or allocate a new identity for a new edge."""
-    from reference_editor import label_node
     node = label_node(node, result)
     models = string_models(nodes, result['image_size'])
     for label, across, along in (('column', 'x', 'y'), ('row', 'y', 'x')):

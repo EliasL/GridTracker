@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from compare_crossing_inputs import profile_color_grayscale
+from string_color import profile_color_grayscale
 
 
 class ProfileColorTests(unittest.TestCase):

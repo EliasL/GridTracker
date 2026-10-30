@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from mesh_hints import identity
-from reference_editor import validate_nodes, validate_reference, parse_fps
+from session_data import validate_nodes, parse_fps, validate_reference, write_json, load_draft, node_geometry, label_node
 
 _SESSION_FPS = object()
 
@@ -100,7 +100,6 @@ class ReviewSession:
         self.save()
 
     def save(self):
-        from run_temporal import write_json
         from calibration import load_calibration
         self.calibration = load_calibration(self.output)
         write_json(self.path, dict(source_sha256=[r['source_sha256'] for r in self.results],
@@ -131,7 +130,6 @@ class ReviewSession:
         self.anchors[index] = deepcopy(document)
         self.fps, self.dirty = parse_fps(document.get('fps')), True
         if index == 0:
-            from run_temporal import write_json
             write_json(self.output/'reference.json', document)
         if self.report is not None:
             # The editor's exact coordinates define the frame. No tracker is run.
@@ -153,7 +151,6 @@ class ReviewSession:
             raise ValueError('The first frame remains the human reference; edit its nodes and confirm to correct it')
         if index not in self.anchors:
             return False
-        from run_temporal import write_json
         history = self.output/'reviews'/'history'
         history.mkdir(parents=True, exist_ok=True)
         stamp = time.time_ns()
@@ -190,7 +187,6 @@ class ReviewSession:
         return report
 
     def saved_drafts(self):
-        from node_editor import load_draft, node_geometry
         from fit_bezier_curves import node_available
         drafts = {}
         for result in self.results:
@@ -333,7 +329,6 @@ def export_report(report, results, output, path=None):
 
 def export_detections(results, output, nodes, fps):
     """Before first-frame approval, fit and export frame-local curve crossings."""
-    from reference_editor import label_node
     from fit_bezier_curves import fit_labeled_curves
     frames = []
     for result in sorted(results, key=lambda r: r['frame']):

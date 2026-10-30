@@ -1,10 +1,6 @@
-"""One cubic Bezier per cleaned scan peak, with four transverse parameters."""
-import argparse
-import json
-from pathlib import Path
+"""Fit cubic Bezier strings and derive their grid intersections."""
 
 import numpy as np
-from PIL import Image, ImageEnhance, ImageOps
 from scipy.optimize import least_squares
 
 
@@ -13,30 +9,27 @@ def bezier_basis(t):
     return np.column_stack(((1-t)**3, 3*(1-t)**2*t, 3*(1-t)*t*t, t**3))
 
 
-def fit_curve(along, across, extent, transverse_extent, initial, smoothness=0, robust_scale=8):
+def fit_curve(along, across, extent, transverse_extent, initial, robust_scale=8):
     along, across = np.asarray(along), np.asarray(across)
     if not len(along):
         raise ValueError("A curve has no assigned nodes")
-    if smoothness < 0 or robust_scale <= 0:
-        raise ValueError("Require nonnegative smoothness and positive robust residual scale")
-    required = 4 if smoothness == 0 else 2
-    if len(np.unique(along)) < required:
-        raise ValueError(f"This curve requires at least {required} distinct longitudinal node positions")
+    if robust_scale <= 0:
+        raise ValueError("Require a positive robust residual scale")
+    if len(np.unique(along)) < 4:
+        raise ValueError("This curve requires at least four distinct longitudinal node positions")
     basis = bezier_basis(along/(extent-1))
-    difference = np.array([[1.,-2,1,0], [0,1,-2,1]])
-    penalty = np.sqrt(smoothness/2)*difference
 
     def residual(controls):
         r = basis@controls-across
         root = np.sqrt(1+(r/robust_scale)**2)
-        # This squared residual is exactly the soft-L1 data loss, without affecting the bend penalty.
-        return np.r_[r*np.sqrt(2/(root+1)/len(across)), penalty@controls]
+        # This squared residual is exactly the soft-L1 data loss.
+        return r*np.sqrt(2/(root+1)/len(across))
 
     def jacobian(controls):
         r = basis@controls-across
         root = np.sqrt(1+(r/robust_scale)**2)
         factor = np.sqrt((root+1)/(2*len(across)))/root
-        return np.vstack((factor[:,None]*basis, penalty))
+        return factor[:,None]*basis
 
     result = least_squares(residual,np.full(4,float(initial)),jac=jacobian,
                            bounds=(np.zeros(4),np.full(4,transverse_extent-1)),
@@ -84,6 +77,15 @@ def curve_intersections(vertical, horizontal, size):
     return np.array(crossings).reshape(-1, 2)
 
 
+def fit_node_curve(nodes, size, width, dim, initial):
+    points = np.array([[n['x'], n['y']] for n in nodes])
+    controls, rmse = fit_curve(points[:, 1-dim], points[:, dim], size[1-dim], size[dim],
+                               initial, robust_scale=width)
+    cp = np.empty((4, 2))
+    cp[:, 1-dim], cp[:, dim] = np.linspace(0, size[1-dim]-1, 4), controls
+    return dict(control_points=cp.tolist(), rmse=rmse, node_ids=[n['id'] for n in nodes])
+
+
 def fit_labeled_curves(nodes, size, width):
     """Fit observations and held boundary endpoints using persistent labels."""
     curves, ignored = [], []
@@ -95,82 +97,6 @@ def fit_labeled_curves(nodes, size, width):
             if len(np.unique(points[:, 1-dim])) < 4:
                 ignored.append(dict(family=family, line_id=identity, node_ids=[n['id'] for n in selected], reason='fewer than four distinct longitudinal positions'))
                 continue
-            controls, rmse = fit_curve(points[:, 1-dim], points[:, dim], size[1-dim], size[dim],
-                                       np.median(points[:, dim]), smoothness=0, robust_scale=width)
-            cp = np.empty((4, 2))
-            cp[:, 1-dim], cp[:, dim] = np.linspace(0, size[1-dim]-1, 4), controls
-            curves.append(dict(family=family, line_id=identity, control_points=cp.tolist(),
-                               rmse=rmse, node_ids=[n['id'] for n in selected]))
+            curve = fit_node_curve(selected, size, width, dim, np.median(points[:, dim]))
+            curves.append(dict(curve, family=family, line_id=identity))
     return curves, ignored
-
-
-def main():
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--analysis",type=Path,default=Path("output/cleaned_scan_peaks/analysis.json"))
-    parser.add_argument("--output",type=Path,default=Path("output/bezier_no_bending"))
-    parser.add_argument("--smoothness",type=float,default=0)
-    args=parser.parse_args()
-    data=json.loads(args.analysis.read_text())
-    nodes=data['nodes'];points=np.array([[n['x'],n['y']] for n in nodes])
-    with Image.open(data['source']) as source:
-        image=ImageOps.exif_transpose(source).convert('RGB')
-    lengths=np.array(image.size)
-    curves, ignored=[],[]
-    for across_axis,name,label in ((0,'x','vertical'),(1,'y','horizontal')):
-        peaks=np.array(data['scans'][name]['retained_peaks'])
-        eligible=np.array([name in node.get('scan_axes',['x','y']) for node in nodes])
-        assignment=np.argmin(abs(points[:,across_axis,None]-peaks),axis=1)
-        for j,node in enumerate(nodes):
-            if eligible[j] and node.get('kind')=='edge' and node.get('line_index') is not None:
-                index=node['line_index']
-                if not 0<=index<len(peaks):
-                    raise ValueError('Edge endpoint line identity does not match the cleaned grid')
-                assignment[j]=index
-        along_axis=1-across_axis
-        for i,peak in enumerate(peaks):
-            selected=np.flatnonzero(eligible & (assignment==i))
-            required = 4 if args.smoothness == 0 else 2
-            if len(np.unique(points[selected,along_axis])) < required:
-                ignored.append({'family':label,'peak':int(peak),'node_ids':[nodes[j]['id'] for j in selected],
-                                'reason':f'fewer than {required} distinct longitudinal node positions'})
-                continue
-            controls,rmse=fit_curve(points[selected,along_axis],points[selected,across_axis],
-                                   lengths[along_axis],lengths[across_axis],peak,args.smoothness,data['sigma_pixels'])
-            control_points=np.empty((4,2))
-            control_points[:,along_axis]=np.linspace(0,lengths[along_axis]-1,4)
-            control_points[:,across_axis]=controls
-            curves.append({'family':label,'peak':int(peak),'control_points':control_points.tolist(),
-                           'node_ids':[nodes[j]['id'] for j in selected],'rmse_pixels':rmse,
-                           'fit_mode':'four_transverse_controls'})
-    args.output.mkdir(parents=True,exist_ok=True)
-    (args.output/'curves.json').write_text(json.dumps({'source':data['source'],'smoothness':args.smoothness,
-        'robust_scale_pixels':data['sigma_pixels'],'control_points_per_curve':4,
-        'fixed_longitudinal_control_positions':'0, 1/3, 2/3, 1 of image extent',
-        'assignment':'direction-eligible nodes only; edge endpoints use known line identity, other nodes use nearest cleaned maximum',
-        'smoothness_penalty':'mean squared second differences of transverse control coordinates',
-        'curves':curves,'ignored':ignored},indent=2)+'\n')
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    plt.rcParams.update({'text.usetex':False,'font.family':'DejaVu Sans'})
-    basis=bezier_basis(np.linspace(0,1,600))
-    fig,axis=plt.subplots(figsize=(13,7),constrained_layout=True)
-    axis.imshow(ImageEnhance.Brightness(image).enhance(3))
-    for family,color in (('vertical','magenta'),('horizontal','cyan')):
-        first=True
-        for curve in curves:
-            if curve['family']==family:
-                line=basis@np.array(curve['control_points'])
-                axis.plot(line[:,0],line[:,1],color=color,lw=1.2,label=family if first else None)
-                first=False
-    axis.scatter(points[:,0],points[:,1],s=22,marker='+',color='white',label=f'{len(nodes)} detected nodes')
-    axis.set_title(f"{sum(c['family']=='vertical' for c in curves)} vertical + {sum(c['family']=='horizontal' for c in curves)} horizontal cubic Bezier curves; four controls each; bending penalty {args.smoothness:g}")
-    axis.set_axis_off();axis.legend(facecolor='#222222',labelcolor='white',loc='upper left')
-    fig.savefig(args.output/'curves.png',dpi=180);fig.savefig(args.output/'curves.pdf');plt.close(fig)
-    print(json.dumps({'curves':len(curves),'vertical':sum(c['family']=='vertical' for c in curves),
-                      'horizontal':sum(c['family']=='horizontal' for c in curves),'ignored':ignored,
-                      'rmse_range_pixels':[min(c['rmse_pixels'] for c in curves),max(c['rmse_pixels'] for c in curves)]}))
-
-
-if __name__=='__main__':
-    main()

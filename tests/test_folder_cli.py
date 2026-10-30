@@ -22,6 +22,24 @@ class FolderTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Not an image folder'):
                 discover_frames(Path(directory)/'missing')
 
+    def test_default_output_is_a_subfolder_for_both_folder_arguments(self):
+        from unittest.mock import patch
+        from run_temporal import main
+        with TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source/'frame_1.jpg').touch()
+            for arguments in ([str(source)], ['--input', str(source)]):
+                with self.subTest(arguments=arguments), \
+                     patch('run_temporal.discover_frames', side_effect=RuntimeError('stop before detection')) as discover:
+                    with self.assertRaisesRegex(RuntimeError, 'stop before detection'):
+                        main(arguments)
+                    discover.assert_called_once_with(source, 'download', source/'gridtracker_results')
+            nested = source/'gridtracker_results'
+            nested.mkdir()
+            (nested/'calibration_image.png').touch()
+            files, _ = discover_frames(source, order='filename', output=nested)
+            self.assertEqual([p.name for p in files], ['frame_1.jpg'])
+
     def test_same_folder_outputs_are_not_rediscovered_as_frames(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

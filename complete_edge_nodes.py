@@ -1,7 +1,4 @@
-"""Accept border proposals, complete missing line endpoints, and export pre-cleanup nodes."""
-import argparse
-import json
-from pathlib import Path
+"""Retain border proposals and complete missing string endpoints."""
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -45,51 +42,3 @@ def complete_endpoints(lines, accepted, profile, cross_profile, allow_missing=Fa
     if sorted(node['line_index'] for node in records if node['line_index'] is not None)!=list(range(len(lines))):
         raise ValueError('Line endpoints are not uniquely assigned')
     return records
-
-
-def main():
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--edges',type=Path,default=Path('output/edge_nodes'))
-    parser.add_argument('--interior',type=Path,default=Path('output/crossing_nodes_lower_mass/nodes.json'))
-    parser.add_argument('--cross-scores',type=Path,default=Path('output/color_grayscale_comparison/crossing_scores.npy'))
-    parser.add_argument('--output',type=Path,default=Path('output/completed_edge_nodes'))
-    args=parser.parse_args()
-    edge_data=json.loads((args.edges/'nodes.json').read_text())
-    interior=json.loads(args.interior.read_text())
-    if edge_data['source']!=interior['source']:
-        raise ValueError('Interior and edge nodes refer to different images')
-    cross=np.load(args.cross_scores)
-    height,image_width=cross.shape
-    depth=edge_data['inward_depth']
-    # Cross fallback is the strongest score in the same narrow inward border strip.
-    cross_profiles={'top':cross[:depth].max(axis=0),'bottom':cross[-depth:].max(axis=0),
-                    'left':cross[:,:depth].max(axis=1),'right':cross[:,-depth:].max(axis=1)}
-    edge_nodes=[]
-    for side in ('top','bottom','left','right'):
-        profile=np.loadtxt(args.edges/f'{side}_scores.csv',delimiter=',',skiprows=1)[:,1]
-        lines=edge_data['grid_vertical_x'] if side in ('top','bottom') else edge_data['grid_horizontal_y']
-        accepted=[node for node in edge_data['edge_nodes'] if node['side']==side]
-        records=complete_endpoints(lines,accepted,profile,cross_profiles[side])
-        for record in records:
-            position=record['profile_center']
-            x,y=((position,0) if side=='top' else (position,height-1) if side=='bottom' else
-                 (0,position) if side=='left' else (image_width-1,position))
-            edge_nodes.append(dict(record,side=side,x=float(x),y=float(y),kind='edge',
-                                   scan_axes=['x'] if side in ('top','bottom') else ['y']))
-    original=[dict(node,kind='interior',scan_axes=['x','y']) for node in interior['nodes']]
-    next_id=max(node['id'] for node in original)+1
-    for offset,node in enumerate(edge_nodes):
-        node['id']=next_id+offset
-    output={'source':interior['source'],'nodes':original+edge_nodes,'interior_count':len(original),
-            'edge_count':len(edge_nodes),'accepted_edge_count':sum(n['origin']=='accepted' for n in edge_nodes),
-            'added_edge_count':sum(n['origin']!='accepted' for n in edge_nodes),
-            'cross_fallback':f'max over existing {depth}-pixel inward strip, projected onto physical border',
-            'matching':'nearest one-to-one accepted match within half median spacing; missing endpoints use nearest local maximum in their line cell',
-            'grid_vertical_x':edge_data['grid_vertical_x'],'grid_horizontal_y':edge_data['grid_horizontal_y']}
-    args.output.mkdir(parents=True,exist_ok=True)
-    (args.output/'nodes.json').write_text(json.dumps(output,indent=2)+'\n')
-    print(json.dumps({key:output[key] for key in ('interior_count','edge_count','accepted_edge_count','added_edge_count')},indent=2))
-
-
-if __name__=='__main__':
-    main()
