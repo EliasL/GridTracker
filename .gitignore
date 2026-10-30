@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+output/
+.DS_Store
+
+.matplotlib-cache/
+Archive-2026-10-29/
+gridtracker_results/
+tmp/
