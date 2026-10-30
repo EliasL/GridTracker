@@ -281,12 +281,16 @@ def main(argv=None):
                     editor.fig.suptitle(f'First-frame verification | {len(results)}/{len(files)} detections complete | {len(errors)} errors')
                     editor.fig.canvas.draw_idle()
                     return True
-                from review_session import export_detections
+                from review_session import export_detections, export_detection_video
                 def export_initial(nodes, fps):
                     collect()
                     return export_detections(list(results.values()), args.output, nodes, fps)
+                def export_initial_video(nodes, fps):
+                    collect()
+                    return export_detection_video(list(results.values()), args.output, nodes, fps)
                 editor = ReferenceEditor(results[0], reference_path, poll=poll_editor, fps=args.fps,
-                                         output=args.output, keep_open=True, on_export=export_initial)
+                                         output=args.output, keep_open=True, on_export=export_initial,
+                                         on_export_video=export_initial_video)
                 figure = editor.fig
                 print('First-frame editor ready. Approve and track to continue; closing only saves a draft.', flush=True)
                 approval = editor.show()

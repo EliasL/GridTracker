@@ -3,4 +3,7 @@ name = "gridtracker"
 version = "0.1.0"
 description = "Two-pass tracking of roughly axis-aligned racket strings"
 requires-python = ">=3.10"
-dependencies = ["numpy>=2", "scipy>=1.14", "pillow>=11", "matplotlib>=3.9", "opencv-python-headless>=4.10"]
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

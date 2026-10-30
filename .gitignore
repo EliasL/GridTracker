@@ -7,3 +7,6 @@ output/
 Archive-2026-10-29/
 gridtracker_results/
 tmp/
+.launcher_state.json
+.launcher_state.tmp
+gridtracker_startup.log

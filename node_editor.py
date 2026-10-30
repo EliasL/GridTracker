@@ -6,8 +6,12 @@ import numpy as np
 from matplotlib.markers import MarkerStyle
 from session_data import node_geometry, load_draft, label_node, parse_fps, save_reference, save_ui_state
 
-NODE_COLORS = dict(verified='white', observed='lime', recovered='cyan', held='gold',
-                   predicted='orange', lost='red', outside='red', draft='deepskyblue')
+NODE_COLORS = dict(verified='lime', observed='lime', recovered='lime', held='orange',
+                   predicted='orange', lost='orange', outside='orange', draft='deepskyblue')
+
+
+def node_marker(node):
+    return 'x' if node['status'] in ('held', 'predicted', 'lost', 'outside') else '+'
 
 
 class NodeEditor:
@@ -37,11 +41,12 @@ class NodeEditor:
         self.selected = next((i for i, n in enumerate(self.nodes) if n['id'] == editor_state.get('selected_id')), None)
         self.show_labels, self.show_candidates = editor_state.get('show_labels', False), editor_state.get('show_candidates', False)
         self.show_missing, self.show_predictions, self.show_connections = True, True, not review
+        self.show_guides = True
         self._last_geometry = node_geometry(self.baseline)
         self.modified, self._disposed = False, False
         self.points = ax.scatter([], [], s=40, marker='+', c='white', picker=10)
         self.selected_point = ax.scatter([], [], s=110, facecolors='none', edgecolors='cyan')
-        self.candidates = ax.scatter([], [], s=24, facecolors='none', edgecolors='violet')
+        self.candidates = ax.scatter([], [], s=24, facecolors='none', edgecolors='yellow')
         self.missing = ax.scatter([], [], s=650, facecolors='none', edgecolors='yellow', linewidths=2.2)
         self.conflicts = ax.scatter([], [], s=180, facecolors='none', edgecolors='red', linewidths=2)
         self.lines, self.labels = [], []
@@ -105,10 +110,11 @@ class NodeEditor:
         visible = [i for i, n in enumerate(self.nodes) if not self.review or self.show_predictions or node_available(n)]
         self.points.set_offsets(points[visible])
         self.points.set_color([NODE_COLORS[self.nodes[i]['status']] if self.review else 'yellow' if self.nodes[i]['kind'] == 'edge' else 'white' for i in visible])
-        markers = [MarkerStyle('o' if self.nodes[i].get('status') == 'held' else
-                               'x' if self.review and not node_available(self.nodes[i]) else '+') for i in visible]
+        self.points.set_visible(self.show_guides)
+        markers = [MarkerStyle(node_marker(self.nodes[i]) if self.review else '+') for i in visible]
         self.points.set_paths([m.get_path().transformed(m.get_transform()) for m in markers])
         self.selected_point.set_offsets(points[[self.selected]] if self.selected is not None else np.empty((0, 2)))
+        self.selected_point.set_visible(self.show_guides)
         candidate_points = [[n['x'], n['y']] for n in self.result['candidate_nodes']] if self.show_candidates else []
         self.candidates.set_offsets(np.array(candidate_points).reshape(-1, 2))
         eligible = [n for n in self.nodes if not self.review or node_available(n)]
@@ -125,7 +131,7 @@ class NodeEditor:
                 line = sorted([n for n in self.nodes if n[key] == identity], key=lambda n: n[coordinate])
                 self.lines += self.ax.plot([n['x'] for n in line], [n['y'] for n in line], color=color, alpha=.35, lw=.7)
         if self.show_labels:
-            self.labels = [self.ax.text(n['x']+3, n['y']-3, f"{n['row']},{n['column']}", color='white', fontsize=7) for n in self.nodes]
+            self.labels = [self.ax.text(n['x']+3, n['y']-3, f"{n['row']},{n['column']}", color='white', fontsize=7) for n in self.nodes] if self.show_guides else []
         detail = '' if self.selected is None else f" | selected ID {self.nodes[self.selected]['id']}: row {self.nodes[self.selected]['row']}, column {self.nodes[self.selected]['column']}"
         self.ax.set_title(f'Frame {self.frame}: {len(self.nodes)} nodes, {len(self.hints)} possible gaps, {len(conflicting)} conflicting nodes{detail}')
         if self.on_redraw is not None:
@@ -134,7 +140,7 @@ class NodeEditor:
 
     def nearest(self, event):
         from fit_bezier_curves import node_available
-        if not self.nodes:
+        if not self.nodes or not self.show_guides:
             return None
         display = self.ax.transData.transform([[n['x'], n['y']] for n in self.nodes])
         distance = np.linalg.norm(display-[event.x, event.y], axis=1)
@@ -143,7 +149,7 @@ class NodeEditor:
         return int(np.argmin(distance)) if distance.min() <= 14 else None
 
     def press(self, event):
-        if not self.active or event.inaxes != self.ax or getattr(self.fig.canvas.toolbar, 'mode', ''):
+        if not self.active or not self.show_guides or event.inaxes != self.ax or getattr(self.fig.canvas.toolbar, 'mode', ''):
             return
         self.selected = self.nearest(event)
         if self.selected is not None:
@@ -162,7 +168,7 @@ class NodeEditor:
             self.autosave()
 
     def move(self, event):
-        if self.active and self.dragging and self.selected is not None and event.inaxes == self.ax:
+        if self.active and self.show_guides and self.dragging and self.selected is not None and event.inaxes == self.ax:
             node = self.nodes[self.selected]
             node['x'], node['y'] = [float(np.clip(v, 0, end-1)) for v, end in zip((event.xdata, event.ydata), self.result['image_size'])]
             if node['kind'] == 'edge':
@@ -177,6 +183,8 @@ class NodeEditor:
 
     def key(self, event):
         if not self.active or self.fps_box.capturekeystrokes or getattr(event, 'inaxes', None) == self.fps_box.ax:
+            return
+        if not self.show_guides:
             return
         if self.review and event.key in ('i', 'h'):
             return  # The review's checkboxes own these shared visibility options.

@@ -49,6 +49,133 @@ class ReviewWidgetTests(unittest.TestCase):
             self.assertTrue(viewer.editor.active)
             plt.close('all')
 
+    def test_crossing_toggle_matches_export_and_updates_with_drafts(self):
+        import numpy as np
+        from matplotlib.collections import PathCollection
+        from review_session import curve_crossing_snapshot
+        with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), matplotlib.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'}):
+            root = Path(directory)
+            results, reference = make_sequence(root)
+            session = ReviewSession(results, reference, root)
+            session.reanalyze()
+            viewer = TrackingReview(session.report, session)
+            viewer.slider.set_val(1)
+            index = list(viewer.OPTIONS).index('Grid crossings')
+            viewer.checks.set_active(index)
+            for edited in (False, True):
+                if edited:
+                    for node in viewer.editor.nodes:
+                        node['x'] += 2
+                    viewer.editor.redraw()
+                    viewer.editor.autosave()
+                snapshot = curve_crossing_snapshot(session.export_snapshot())
+                expected = [[n['x'], n['y']] for n in snapshot['frames'][1]['nodes'] if n['status'] == 'curve_crossing']
+                crossing = [a for a in viewer.curve_artists if isinstance(a, PathCollection)]
+                self.assertEqual(len(crossing), 1)
+                np.testing.assert_allclose(crossing[0].get_offsets(), expected)
+            viewer.checks.set_active(list(viewer.OPTIONS).index('Guide nodes'))
+            self.assertFalse(viewer.editor.points.get_visible())
+            before = len(viewer.editor.nodes)
+            viewer.editor.selected = 0
+            viewer.editor.key(SimpleNamespace(key='delete'))
+            self.assertEqual(len(viewer.editor.nodes), before)
+            viewer.checks.set_active(index)
+            self.assertFalse(any(isinstance(a, PathCollection) for a in viewer.curve_artists))
+            self.assertNotIn(1, session.anchors)
+            names = [item.get_text() for item in viewer.legend.get_texts()]
+            self.assertEqual(len(names), 6)
+            self.assertIn('Tracked / confirmed', names)
+            viewer.fig.canvas.draw()
+            renderer = viewer.fig.canvas.get_renderer()
+            bounds = viewer.legend.get_window_extent(renderer)
+            panel = viewer.legend.axes.get_window_extent(renderer)
+            self.assertGreaterEqual(bounds.x0, panel.x0)
+            self.assertLessEqual(bounds.x1, panel.x1)
+            self.assertGreaterEqual(bounds.y0, panel.y0)
+            self.assertLessEqual(bounds.y1, panel.y1)
+            panels = [viewer.checks.ax]+[b.ax for b in viewer.buttons.values()]
+            for i, first in enumerate(panels):
+                for second in panels[i+1:]:
+                    self.assertFalse(first.get_position().overlaps(second.get_position()))
+            plt.close('all')
+
+    def test_mp4_button_includes_saved_drafts_without_confirming_or_exporting_csv(self):
+        import cv2
+        from copy import deepcopy
+        with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), matplotlib.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'}):
+            root = Path(directory)
+            results, reference = make_sequence(root)
+            session = ReviewSession(results, reference, root)
+            session.reanalyze()
+            viewer = TrackingReview(session.report, session)
+            viewer.slider.set_val(1)
+            for node in viewer.editor.nodes:
+                node['x'] += 12
+            viewer.editor.redraw()
+            anchors = deepcopy(session.anchors)
+            report = deepcopy(session.report)
+            with patch.object(session, 'export_csv', side_effect=AssertionError('CSV must remain separate')):
+                viewer.export_video()
+            self.assertEqual(session.anchors, anchors)
+            self.assertEqual(session.report, report)
+            self.assertFalse(list(root.glob('*.csv')))
+            self.assertEqual(viewer.mode, 'review')
+            self.assertTrue(viewer.editor.active)
+            self.assertTrue(viewer.buttons['Export MP4'].get_active())
+            capture = cv2.VideoCapture(str(root/'grid_crossings.mp4'))
+            try:
+                self.assertTrue(capture.isOpened())
+                self.assertEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 3)
+                capture.set(cv2.CAP_PROP_POS_FRAMES, 1)
+                valid, pixels = capture.read()
+                self.assertTrue(valid)
+                self.assertGreater(pixels[35, 48].min(), 190)
+            finally:
+                capture.release()
+            plt.close('all')
+
+    def test_first_frame_mp4_export_uses_completed_detections_without_approval(self):
+        import cv2
+        from review_session import export_detection_video
+        with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), matplotlib.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'}):
+            root = Path(directory)
+            results, _ = make_sequence(root)
+            editor = ReferenceEditor(results[0], root/'unapproved.json',
+                                     on_export_video=lambda nodes, fps: export_detection_video(results, root, nodes, fps))
+            for node in editor.nodes:
+                node['x'] += 12
+            editor.redraw()
+            editor.export_video()
+            self.assertIsNone(editor.approved)
+            self.assertFalse(editor.path.exists())
+            self.assertFalse(list(root.glob('*.csv')))
+            capture = cv2.VideoCapture(str(root/'grid_crossings.mp4'))
+            try:
+                self.assertEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 3)
+                self.assertAlmostEqual(capture.get(cv2.CAP_PROP_FPS), 30)
+                valid, pixels = capture.read()
+                self.assertTrue(valid)
+                self.assertGreater(pixels[35, 47].min(), 190)
+            finally:
+                capture.release()
+            plt.close('all')
+
+    def test_failed_mp4_export_restores_controls_and_editor(self):
+        with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), matplotlib.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'}):
+            root = Path(directory)
+            results, reference = make_sequence(root)
+            session = ReviewSession(results, reference, root)
+            session.reanalyze()
+            viewer = TrackingReview(session.report, session)
+            with patch.object(session, 'export_video', side_effect=RuntimeError('encoder failed')):
+                with self.assertRaisesRegex(RuntimeError, 'encoder failed'):
+                    viewer.export_video()
+            self.assertEqual(viewer.mode, 'review')
+            self.assertTrue(viewer.editor.active)
+            self.assertTrue(all(button.get_active() for name, button in viewer.buttons.items() if name != 'Unmark frame'))
+            self.assertIn('failed', viewer.message.get_text())
+            plt.close('all')
+
     def test_next_ten_button_requests_frames_after_current_selection(self):
         from unittest.mock import patch
         with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), matplotlib.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'}):

@@ -77,6 +77,30 @@ def curve_intersections(vertical, horizontal, size):
     return np.array(crossings).reshape(-1, 2)
 
 
+def grid_crossings(curves, size, labels=None):
+    """One node per row/column pair; missing or ambiguous crossings have no position."""
+    fits = {'horizontal': {}, 'vertical': {}}
+    for curve in curves:
+        group = fits[curve['family']]
+        if curve['line_id'] in group:
+            raise ValueError('Duplicate fitted string identity')
+        group[curve['line_id']] = curve
+    if labels is None:
+        labels = dict(row=fits['horizontal'], column=fits['vertical'])
+    nodes = []
+    for row in sorted(labels['row']):
+        for column in sorted(labels['column']):
+            vertical, horizontal = fits['vertical'].get(column), fits['horizontal'].get(row)
+            points = curve_intersections(vertical, horizontal, size) if vertical is not None and horizontal is not None else np.empty((0, 2))
+            count = len(points)
+            xy = points[0].tolist() if count == 1 else [None, None]
+            status = ('missing_curve' if vertical is None or horizontal is None else
+                      'no_intersection' if count == 0 else 'ambiguous_intersections' if count > 1 else 'curve_crossing')
+            nodes.append(dict(row=row, column=column, x=xy[0], y=xy[1], status=status,
+                              intersection_count=count, intersections=points.tolist()))
+    return nodes
+
+
 def fit_node_curve(nodes, size, width, dim, initial):
     points = np.array([[n['x'], n['y']] for n in nodes])
     controls, rmse = fit_curve(points[:, 1-dim], points[:, dim], size[1-dim], size[dim],

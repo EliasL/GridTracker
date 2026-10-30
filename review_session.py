@@ -199,13 +199,13 @@ class ReviewSession:
                     drafts[index] = [n for n in document['nodes'] if node_available(n)]
         return drafts
 
-    def export_csv(self, path=None, draft=None, fps=_SESSION_FPS, drafts=None):
+    def export_snapshot(self, draft=None, fps=_SESSION_FPS, drafts=None):
         if self.report is None:
             self.reanalyze()
         report = deepcopy(self.report)
         report['fps'] = self.fps if fps is _SESSION_FPS else parse_fps(fps)
         report['needs_reanalysis'] = self.dirty
-        drafts = dict(drafts or {})
+        drafts = dict(self.saved_drafts() if drafts is None else drafts)
         if draft is not None:
             drafts[draft[0]] = draft[1]
         for index, nodes in drafts.items():
@@ -216,12 +216,22 @@ class ReviewSession:
             frame['nodes'] = [dict(n, measured_xy=[n['x'], n['y']], status='draft', measurement_source='human_draft') for n in nodes]
             from fit_bezier_curves import fit_labeled_curves
             frame['curves'], frame['ignored_curves'] = fit_labeled_curves(frame['nodes'], frame['image_size'], self.results[index]['width'])
+        return report
+
+    def export_csv(self, path=None, draft=None, fps=_SESSION_FPS, drafts=None):
+        report = self.export_snapshot(draft=draft, fps=fps, drafts=drafts)
         return export_report(report, self.results, self.output, path)
+
+    def export_video(self, path=None, *, playback_fps=30, progress=None):
+        from video_export import export_video
+        report = self.export_snapshot()
+        return export_video(report, path or self.output/'grid_crossings.mp4',
+                            playback_fps=playback_fps, progress=progress)
 
 
 def curve_crossing_snapshot(report):
     """Export geometry is derived from the displayed curve fits, never guide points."""
-    from fit_bezier_curves import curve_intersections
+    from fit_bezier_curves import grid_crossings
     report = deepcopy(report)
     families = {'horizontal': 'row', 'vertical': 'column'}
     global_labels = {label: set() for label in families.values()}
@@ -233,31 +243,18 @@ def curve_crossing_snapshot(report):
         for curve in frame['curves']+frame['ignored_curves']:
             global_labels[families[curve['family']]].add(curve['line_id'])
     for frame in report['frames']:
-        fits = {family: {} for family in families}
-        for curve in frame['curves']:
-            group = fits[curve['family']]
-            if curve['line_id'] in group:
-                raise ValueError('Duplicate fitted string identity')
-            group[curve['line_id']] = curve
         labels = global_labels if report.get('identities_linked', True) else {
             label: {n[label] for n in frame['nodes'] if n.get(label) is not None}
             for label in global_labels}
         guides = frame['nodes']
         nodes = []
-        for row in sorted(labels['row']):
-            for column in sorted(labels['column']):
-                vertical, horizontal = fits['vertical'].get(column), fits['horizontal'].get(row)
-                points = curve_intersections(vertical, horizontal, frame['image_size']) if vertical is not None and horizontal is not None else np.empty((0, 2))
-                count = len(points)
-                xy = points[0].tolist() if count == 1 else [None, None]
-                status = ('missing_curve' if vertical is None or horizontal is None else
-                          'no_intersection' if count == 0 else 'ambiguous_intersections' if count > 1 else 'curve_crossing')
-                nodes.append(dict(id=f'r{row}:c{column}', row=row, column=column, kind='interior',
-                                  x=xy[0], y=xy[1], measured_xy=None, status=status,
-                                  measurement_source='bezier_intersection', estimate_source='bezier_intersection',
-                                  position_verified=False, intersection_count=count, intersections=points.tolist(),
-                                  guide_node_ids=[n['id'] for n in guides if n['kind'] == 'interior' and n['row'] == row and n['column'] == column],
-                                  velocity=None, acceleration=None))
+        for crossing in grid_crossings(frame['curves'], frame['image_size'], labels):
+            row, column = crossing['row'], crossing['column']
+            nodes.append(dict(crossing, id=f'r{row}:c{column}', kind='interior', measured_xy=None,
+                              measurement_source='bezier_intersection', estimate_source='bezier_intersection',
+                              position_verified=False,
+                              guide_node_ids=[n['id'] for n in guides if n['kind'] == 'interior' and n['row'] == row and n['column'] == column],
+                              velocity=None, acceleration=None))
         frame['nodes'] = nodes
     if report.get('identities_linked', True):
         update_kinematics(report, include_estimates=True)
@@ -327,8 +324,8 @@ def export_report(report, results, output, path=None):
     return paths
 
 
-def export_detections(results, output, nodes, fps):
-    """Before first-frame approval, fit and export frame-local curve crossings."""
+def detection_snapshot(results, nodes, fps):
+    """Before first-frame approval, fit frame-local curves from completed detections."""
     from fit_bezier_curves import fit_labeled_curves
     frames = []
     for result in sorted(results, key=lambda r: r['frame']):
@@ -339,5 +336,14 @@ def export_detections(results, output, nodes, fps):
                                        measurement_source='human_draft' if result['frame'] == 0 else 'independent_detection') for n in draft],
                            curves=[], ignored_curves=[]))
         frames[-1]['curves'], frames[-1]['ignored_curves'] = fit_labeled_curves(frames[-1]['nodes'], result['image_size'], result['width'])
-    return export_report(dict(fps=fps, identities_linked=False, frames=frames), results, output)
+    return dict(fps=fps, identities_linked=False, frames=frames)
+
+
+def export_detections(results, output, nodes, fps):
+    return export_report(detection_snapshot(results, nodes, fps), results, output)
+
+
+def export_detection_video(results, output, nodes, fps):
+    from video_export import export_video
+    return export_video(detection_snapshot(results, nodes, fps), Path(output)/'grid_crossings.mp4')
 

@@ -3,10 +3,10 @@ import numpy as np
 import matplotlib
 from PIL import Image, ImageEnhance, ImageOps
 
-from fit_bezier_curves import bezier_basis, node_available
+from fit_bezier_curves import bezier_basis, node_available, grid_crossings
 from mesh_hints import missing_crossings
 
-from node_editor import NODE_COLORS, NodeEditor
+from node_editor import NODE_COLORS, NodeEditor, node_marker
 from session_data import node_geometry, load_ui_state, parse_fps, save_reference
 
 COLORS = NODE_COLORS
@@ -17,7 +17,7 @@ def background(path):
         return ImageEnhance.Brightness(ImageOps.exif_transpose(source).convert('RGB')).enhance(3)
 
 
-def plot_frame(ax, frame, *, candidates=False, predictions=True, curves=True, labels=False, missing=True):
+def plot_frame(ax, frame, *, candidates=False, predictions=True, curves=True, labels=False, missing=True, guides=True, crossings=False):
     ax.imshow(background(frame['source']))
     if curves:
         basis = bezier_basis(np.linspace(0, 1, 300))
@@ -25,21 +25,32 @@ def plot_frame(ax, frame, *, candidates=False, predictions=True, curves=True, la
             points = basis@np.array(curve['control_points'])
             ax.plot(points[:, 0], points[:, 1], color='magenta' if curve['family'] == 'vertical' else 'cyan', lw=.7, alpha=.7)
     for status, color in COLORS.items():
-        nodes = [n for n in frame['nodes'] if n['status'] == status and (predictions or node_available(n))]
+        nodes = [n for n in frame['nodes'] if guides and n['status'] == status and (predictions or node_available(n))]
         points = np.array([[n['x'], n['y']] for n in nodes]).reshape(-1, 2)
-        ax.scatter(points[:, 0], points[:, 1], marker='o' if status == 'held' else '+' if status in ('verified', 'observed', 'recovered') else 'x', c=color, s=28, clip_on=True)
+        ax.scatter(points[:, 0], points[:, 1], marker=node_marker(dict(status=status)), c=color, s=28, clip_on=True)
         if labels:
             for n in nodes:
                 ax.text(n['x']+3, n['y']-3, str(n['id']), color=color, fontsize=7)
+    if crossings:
+        plot_crossings(ax, grid_crossings(frame['curves'], frame['image_size']), labels)
     if candidates:
         points = np.array([[n['x'], n['y']] for n in frame['unclaimed_detections']]).reshape(-1, 2)
-        ax.scatter(points[:, 0], points[:, 1], marker='o', facecolors='none', edgecolors='violet', s=40)
+        ax.scatter(points[:, 0], points[:, 1], marker='o', facecolors='none', edgecolors='yellow', s=40)
     if missing:
         hints = missing_crossings([n for n in frame['nodes'] if node_available(n)], frame['image_size'], frame.get('width', 8))
         points = np.array([[h['x'], h['y']] for h in hints]).reshape(-1, 2)
         ax.scatter(points[:, 0], points[:, 1], s=650, facecolors='none', edgecolors='yellow', linewidths=2)
     ax.set_title(f"Frame {frame['frame']}: {sum(n['measured_xy'] is not None for n in frame['nodes'])}/{len(frame['nodes'])} observed")
     ax.set_axis_off()
+
+
+def plot_crossings(ax, nodes, labels=False):
+    nodes = [n for n in nodes if n['status'] == 'curve_crossing']
+    points = np.array([[n['x'], n['y']] for n in nodes]).reshape(-1, 2)
+    artists = [ax.scatter(points[:, 0], points[:, 1], s=28, c='white', edgecolors='black', linewidths=.5, zorder=6)]
+    if labels:
+        artists += [ax.text(n['x']+3, n['y']-3, f"{n['row']},{n['column']}", color='white', fontsize=7) for n in nodes]
+    return artists
 
 
 @matplotlib.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'})
@@ -56,16 +67,19 @@ def save_overview(report, path):
     for i, frame in enumerate(sampled):
         plot_frame(fig.add_subplot(grid[i//columns, i % columns]), frame)
     ax = fig.add_subplot(grid[-1, :])
-    for status, color in COLORS.items():
-        ax.plot([f['frame'] for f in frames], [f['counts'].get(status, 0) for f in frames], '-o', label=status, color='gray' if status == 'verified' else color)
+    for name, statuses, color in (('Tracked / confirmed', ('verified', 'observed', 'recovered'), 'lime'),
+                                   ('Edited', ('draft',), 'deepskyblue'),
+                                   ('Held / missing', ('held', 'predicted', 'lost', 'outside'), 'orange')):
+        ax.plot([f['frame'] for f in frames], [sum(f['counts'].get(s, 0) for s in statuses) for f in frames],
+                '-o', label=name, color=color)
     ax.set(xlabel='Frame', ylabel='Number of nodes', title='Missing interiors are excluded from curve fits; boundary endpoints hold their last identified positions')
     ax.legend(ncol=6)
     fig.savefig(path, dpi=130)
 
 
 class TrackingReview:
-    OPTIONS = dict(Candidates='candidates', **{'Held / lost': 'predictions'},
-                   Curves='curves', Labels='labels', Missing='missing')
+    OPTIONS = {'Guide nodes': 'guides', 'Grid crossings': 'crossings', 'Candidates': 'candidates',
+               'Held / missing': 'predictions', 'Curves': 'curves', 'Labels': 'labels', 'Missing': 'missing'}
 
     def __init__(self, report, session=None, figure=None):
         import matplotlib.pyplot as plt
@@ -76,7 +90,7 @@ class TrackingReview:
         self.mode, self.calibration_panel = 'review', None
         saved_ui = load_ui_state(session.output, len(report['frames'])) if session is not None else dict(frame=0, mode='review')
         self.state = dict(frame=saved_ui['frame'], selected=None, selected_candidate=None,
-                          candidates=False, predictions=True, curves=True, labels=False, missing=True)
+                          candidates=False, predictions=True, curves=True, labels=False, missing=True, guides=True, crossings=False)
         self.fig = figure if figure is not None else plt.figure(figsize=(16, 9))
         self.fig.clear()
         self.fig.set_facecolor('white')
@@ -91,25 +105,25 @@ class TrackingReview:
                                initial='' if report.get('fps') is None else str(report['fps']))
         self.fps_box.label.set_color('#222222')
         self.fps_box.text_disp.set_color('#222222')
-        legend_ax = self.fig.add_axes([.805, .57, .19, .37], facecolor='#171717')
+        legend_ax = self.fig.add_axes([.805, .71, .19, .25], facecolor='#171717')
         legend_ax.set(xticks=[], yticks=[])
-        names = dict(verified='Human verified', observed='Observed', recovered='Recovered',
-                     held='Held edge', predicted='Held interior', lost='Lost', outside='Outside image', draft='Edited draft')
-        handles = [Line2D([], [], color=color, marker='o' if status == 'held' else '+' if status in ('verified', 'observed', 'recovered', 'draft') else 'x',
-                          linestyle='none', markersize=10, label=names[status]) for status, color in COLORS.items()]
-        handles += [Line2D([], [], color=color, marker='o', fillstyle='none', linestyle='none', markersize=12, label=label)
-                    for color, label in (('yellow', 'Possibly missing'), ('violet', 'Unclaimed candidate'), ('red', 'Conflicting identity'))]
+        handles = [Line2D([], [], color=color, marker=marker, linestyle='none', markersize=9,
+                          markerfacecolor='none' if label in ('Suggestions', 'Conflicts') else color, label=label)
+                   for color, marker, label in (('lime', '+', 'Tracked / confirmed'), ('deepskyblue', '+', 'Edited'),
+                                                ('orange', 'x', 'Held / missing'), ('white', 'o', 'Grid crossings'),
+                                                ('yellow', 'o', 'Suggestions'), ('red', 'o', 'Conflicts'))]
         self.legend = legend_ax.legend(handles=handles, loc='center left', frameon=False, labelcolor='linecolor', fontsize=10)
-        self.checks = CheckButtons(self.fig.add_axes([.815, .37, .18, .18], facecolor='#f5f5f5'),
-                                  list(self.OPTIONS), [False, True, True, False, True])
+        self.checks = CheckButtons(self.fig.add_axes([.815, .405, .18, .28], facecolor='#f5f5f5'),
+                                  list(self.OPTIONS), [self.state[key] for key in self.OPTIONS.values()])
         for label in self.checks.labels:
             label.set_color('#222222')
         for widget in (self.slider.label, self.slider.valtext):
             widget.set_color('#222222')
         self.buttons = {}
-        for name, y, callback in (('Help', .315, self.toggle_help), ('Confirm frame', .265, self.confirm),
-                                  ('Reanalyze', .215, self.reanalyze), ('Reanalyze next 10', .165, self.reanalyze_next), ('Export CSV', .115, self.export),
-                                  ('Calibrate length', .065, self.calibrate), ('Unmark frame', .015, self.unmark)):
+        for name, y, callback in (('Help', .355, self.toggle_help), ('Confirm frame', .305, self.confirm),
+                                  ('Reanalyze', .255, self.reanalyze), ('Reanalyze next 10', .205, self.reanalyze_next),
+                                  ('Export CSV', .155, self.export), ('Export MP4', .105, self.export_video),
+                                  ('Calibrate length', .055, self.calibrate), ('Unmark frame', .005, self.unmark)):
             button = Button(self.fig.add_axes([.825, y, .16, .04]), name)
             if name == 'Reanalyze':
                 button.label.set_text('Reanalyze all')
@@ -149,10 +163,10 @@ class TrackingReview:
         self.detach_editor()
         self.state['frame'] = index
         self.ax.clear()
-        self.ax.imshow(background(self.report['frames'][index]['source']))
         self.ax.set_axis_off()
         self.curve_artists, self._fit_geometry = [], None
         if self.session is not None:
+            self.ax.imshow(background(self.report['frames'][index]['source']))
             roster = self.session.roster()
             self.editor = NodeEditor(self.session.results[index], self.session.output/'reviews'/f'frame_{index:02d}.json',
                                      self.fig, self.ax, self.fps_box,
@@ -162,7 +176,7 @@ class TrackingReview:
             self.editor.on_redraw = self.refresh
             self.apply_options()
         else:
-            plot_frame(self.ax, self.report['frames'][index], **{k: self.state[k] for k in ('candidates', 'predictions', 'curves', 'labels', 'missing')})
+            plot_frame(self.ax, self.report['frames'][index], **{k: self.state[k] for k in tuple(self.OPTIONS.values())})
         if limits is not None:
             self.ax.set_xlim(limits[0])
             self.ax.set_ylim(limits[1])
@@ -171,7 +185,7 @@ class TrackingReview:
     def apply_options(self):
         if self.editor is None:
             return
-        for key in ('candidates', 'predictions', 'labels', 'missing'):
+        for key in ('candidates', 'predictions', 'labels', 'missing', 'guides'):
             setattr(self.editor, 'show_'+key, self.state[key])
         self.editor.active = not self.help.visible
         self.editor.redraw()
@@ -185,6 +199,7 @@ class TrackingReview:
                 self.preview_curves, self.preview_ignored = fit_labeled_curves(editor.nodes, frame['image_size'], frame['width'])
             else:
                 self.preview_curves, self.preview_ignored = frame['curves'], frame['ignored_curves']
+            self.preview_crossings = grid_crossings(self.preview_curves, frame['image_size'])
             self._fit_geometry = geometry
         for artist in self.curve_artists:
             artist.remove()
@@ -194,20 +209,23 @@ class TrackingReview:
             for curve in self.preview_curves:
                 points = basis@np.array(curve['control_points'])
                 self.curve_artists += self.ax.plot(points[:, 0], points[:, 1], color='magenta' if curve['family'] == 'vertical' else 'cyan', lw=.8, alpha=.7)
+        if self.state['crossings']:
+            self.curve_artists += plot_crossings(self.ax, self.preview_crossings, self.state['labels'])
         confirmed = editor.frame in self.session.anchors
         title = 'UNCONFIRMED EDITS (autosaved)' if editor.modified else 'HUMAN CONFIRMED' if confirmed else 'Needs review'
         self.ax.set_title(self.ax.get_title()+' | '+title, color='#222222')
         count = len(self.session.anchors)
         self.fig.suptitle(f'{count}/{len(self.report["frames"])} frames confirmed'
                           +(' | Corrections need reanalysis' if self.session.dirty else ''), color='#222222')
-        if editor.selected is not None:
+        if editor.selected is not None and self.state['guides']:
             node = editor.nodes[editor.selected]
             self.state['selected'], self.state['selected_candidate'] = node['id'], None
             self.info.set_text(f"ID {node['id']} | row {node['row']}, column {node['column']} | {node.get('status')} | source: {node.get('measurement_source')}\n"
                                f"Velocity ({self.report['velocity_unit']}): {node.get('velocity')} | acceleration ({self.report['acceleration_unit']}): {node.get('acceleration')}")
         else:
             self.state['selected'] = None
-            self.info.set_text('Nodes are always editable. Drafts autosave; Confirm frame fixes a human reference.')
+            self.info.set_text('Drafts autosave; Confirm frame fixes a human reference.' if self.state['guides'] else
+                               'Enable Guide nodes to edit. Grid crossings show the fitted intersections used for export.')
         for name, enabled in (('Export CSV', True), ('Unmark frame', editor.frame != 0 and confirmed)):
             self.buttons[name].active = enabled
             self.buttons[name].label.set_color('#222222' if enabled else 'gray')
@@ -217,7 +235,10 @@ class TrackingReview:
             return
         key = self.OPTIONS[label]
         self.state[key] = not self.state[key]
-        self.apply_options()
+        if self.editor is None:
+            self.draw()
+        else:
+            self.apply_options()
 
     def toggle_help(self, event=None):
         if self.mode != 'review':
@@ -319,6 +340,29 @@ class TrackingReview:
             self.say(str(error))
             return
         self.say(f'Exported fitted crossings, curves, and candidates to {paths[0].parent}')
+
+    def export_video(self, event=None):
+        from plot_widgets import paused_widgets
+        if self.session is None or self.mode != 'review':
+            return
+        self.editor.autosave()
+        self.editor.active = False
+        self.mode = 'processing'
+        self.say('Exporting fitted grid crossings to MP4 (30 fps playback)…')
+        def progress(done, total):
+            if done % 10 == 0 or done == total:
+                self.say(f'Exporting MP4: {done}/{total} frames')
+                self.fig.canvas.flush_events()
+        try:
+            with paused_widgets([self.slider, self.checks, self.fps_box, *self.buttons.values()]):
+                path = self.session.export_video(progress=progress)
+        except Exception as error:
+            self.say(f'MP4 export failed: {error}')
+            raise
+        finally:
+            self.mode = 'review'
+            self.apply_options()
+        self.say(f'Exported {path.name} (30 fps playback) to {path.parent}')
 
     def calibrate(self, event=None):
         if self.session is None or self.mode != 'review':

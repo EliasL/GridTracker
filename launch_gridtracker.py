@@ -1,5 +1,8 @@
 """Native folder chooser shared by the Windows, Linux, and macOS launchers."""
 from pathlib import Path
+import json
+
+STATE_PATH = Path(__file__).with_name('.launcher_state.json')
 
 
 class FolderChooser:
@@ -8,9 +11,10 @@ class FolderChooser:
         from tkinter import ttk
 
         self.root, self.selection = root, None
-        self.input = tk.StringVar(root)
-        self.output = tk.StringVar(root)
-        self.same_folder = tk.BooleanVar(root, value=True)
+        saved = json.loads(STATE_PATH.read_text()) if STATE_PATH.exists() else {}
+        self.input = tk.StringVar(root, value=saved.get('input', ''))
+        self.output = tk.StringVar(root, value=saved.get('output', ''))
+        self.same_folder = tk.BooleanVar(root, value=saved.get('same_folder', True))
         root.title('Open GridTracker')
         root.columnconfigure(1, weight=1)
         root.minsize(600, 200)
@@ -38,17 +42,27 @@ class FolderChooser:
 
     def choose_input(self):
         from tkinter.filedialog import askdirectory
+        previous = self.input.get().strip()
         path = askdirectory(parent=self.root, title='Choose the folder of image frames',
-                            initialdir=self.input.get() or str(Path.home()), mustexist=True)
+                            initialdir=str(Path(previous).expanduser().parent if previous else Path.home()), mustexist=True)
         if path:
             self.input.set(path)
+            self.save_folders()
 
     def choose_output(self):
         from tkinter.filedialog import askdirectory
+        previous = self.output.get().strip() or self.input.get().strip()
         path = askdirectory(parent=self.root, title='Choose the results folder',
-                            initialdir=self.output.get() or self.input.get() or str(Path.home()), mustexist=False)
+                            initialdir=str(Path(previous).expanduser().parent if previous else Path.home()), mustexist=False)
         if path:
             self.output.set(path)
+            self.save_folders()
+
+    def save_folders(self):
+        temporary = STATE_PATH.with_suffix('.tmp')
+        temporary.write_text(json.dumps(dict(input=self.input.get(), output=self.output.get(),
+                                             same_folder=self.same_folder.get()), indent=2)+'\n')
+        temporary.replace(STATE_PATH)
 
     def start(self):
         from tkinter import messagebox
@@ -61,6 +75,7 @@ class FolderChooser:
             discover_frames(source, output=destination)
             if destination.exists() and not destination.is_dir():
                 raise ValueError(f'Results destination is not a folder: {destination}')
+            self.save_folders()
         except (ValueError, OSError) as error:
             messagebox.showerror('Cannot open GridTracker', str(error), parent=self.root)
             return

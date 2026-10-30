@@ -5,18 +5,34 @@ frames, review the nodes interactively, and export fitted string intersections.
 
 ## Setup and launch
 
-Install Python 3.10 or later with Tk support, then install the dependencies:
+1. **Extract the entire downloaded ZIP** into a writable folder, such as Documents.
+   Keep all the project files together; do not run a launcher inside the ZIP viewer.
+2. If needed, install **Python 3.10 or later with Tk support** from
+   [python.org](https://www.python.org/downloads/). Python itself must be installed;
+   the launcher handles the application libraries.
+3. Open the launcher for your system:
 
-```sh
-uv venv .venv
-uv pip install --python .venv -r pyproject.toml
-```
+- **Windows:** double-click `Start GridTracker (Windows).bat`.
+- **macOS:** double-click `Start GridTracker (Mac).command`.
+- **Linux:** run `Start GridTracker (Linux).sh` in a terminal (enable executable
+  permissions if needed).
 
-Open the launcher for your system:
+On first launch, GridTracker automatically creates `.venv`, sets up pip, and
+installs the libraries listed in `requirements.txt`. **No manual pip commands or
+uv installation are required.** Keep the terminal open while setup runs; the
+first installation needs internet and can take a few minutes. Packages are
+installed locally in the project, without changing the system Python libraries.
+Later launches check the environment and reuse it without contacting the package
+server unless dependencies changed or need repair.
 
-- **Windows:** double-click `Start GridTracker.bat`.
-- **macOS:** double-click `Start GridTracker.command`.
-- **Linux:** run `Start GridTracker.sh` (enable executable permissions if needed).
+Python's Tk graphical interface is checked before downloading libraries. Linux
+may need its matching `python3-tk` and `python3-venv` system packages. On Windows
+and macOS, use a Python installation with Tcl/Tk support. Tk cannot be installed
+with pip. If these prerequisites are missing, the launcher explains what is
+needed and keeps its terminal open. Once Python starts, detailed startup and
+installation output is saved in **`gridtracker_startup.log`** beside the launchers;
+include it when reporting a setup problem. An incomplete or copied `.venv` is reported explicitly; remove only
+that folder and rerun setup, keeping your images and results.
 
 Choose the folder containing your image frames. Results and saved edits default
 to **`gridtracker_results/` inside that folder**, keeping them separate from the
@@ -24,10 +40,24 @@ images. Uncheck **Save results in a subfolder of the frames folder** to choose a
 custom destination. Choose the same results destination to resume saved work.
 Closing the chooser cancels without starting analysis.
 
-Launchers prefer the project's `.venv`, otherwise system Python 3. Install a new
-virtual environment on each computer; copied environments are not portable
-between operating systems. Linux may require the `python3-tk` system package.
-Launcher errors remain in the terminal for diagnosis.
+The chooser remembers the previous input and output folders and restores them on
+the next launch. **Browse** opens in the parent of the last selected folder, making
+it easy to choose another video alongside it. Canceling a browse dialog keeps the
+previous choice. These local preferences are stored in `.launcher_state.json`.
+
+Launchers prefer a working project interpreter, otherwise an installed Python
+3.10+ interpreter. Environments are created separately on each computer; do not
+copy `.venv` between computers or include it in a distribution ZIP.
+
+For manual setup on macOS/Linux, the equivalent commands are:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+On Windows, use `py -3 -m venv .venv`, then
+`.venv\Scripts\python.exe -m pip install -r requirements.txt`.
 
 The same application can be launched from the command line:
 
@@ -76,7 +106,10 @@ an explicit confirmation state.
 - `[`/`]` changes the selected column; `,`/`.` changes its row. Labels start at
   zero and remain stable integer identities, including when inserting strings.
 - `i`/`h` toggles labels/candidates in the first editor. Review has checkboxes for
-  candidates, held/lost nodes, curves, labels, and missing-crossing hints.
+  **Guide nodes**, **Grid crossings**, candidates, held/missing nodes, curves,
+  labels, and missing-crossing hints. Grid crossings are fitted intersections,
+  updated as you edit. Hide Guide nodes to view just the derived geometry;
+  enable them again to edit.
 - Use the slider or arrow keys to change frames. Select **Help** for instructions.
 - Toolbar zoom/pan disables node manipulation until deselected.
 
@@ -102,10 +135,13 @@ full reanalysis.
 tracking. Its former anchor and drafts remain in `reviews/history/`. The first
 frame stays confirmed as the required initialization reference.
 
-Yellow rings suggest missing crossings inferred from the current boundary grid.
-They never add nodes or block confirmation. Predictions within two string widths
-of an image border are suppressed to tolerate clipped lines. Red rings flag
-conflicting identities; violet rings show unclaimed detections.
+The review legend groups guide nodes into green **Tracked / confirmed**, blue
+**Edited**, and orange **Held / missing**. White dots mark fitted **Grid crossings**.
+Yellow rings mark **Suggestions**, including missing-crossing hints and unclaimed
+candidates; red rings mark **Conflicts**. Detailed tracking statuses remain in the
+saved data. Suggestions never add nodes or block confirmation. Missing-crossing
+hints within two string widths of an image border are suppressed to tolerate
+clipped lines.
 
 ## Motion, missing nodes, and curve fitting
 
@@ -142,6 +178,21 @@ Boundary intersections have no material-point velocity or acceleration. Motion
 includes camera/racket motion, and differentiation can amplify localization noise.
 
 ## Export and calibration
+
+**Export MP4** is a separate button from **Export CSV**, available during first-frame
+setup and subsequent review. It saves `grid_crossings.mp4` in the results folder,
+with white fitted-crossing dots over the same brightened source images used in
+review. It includes saved drafts without confirming frames, and creates no CSVs.
+Missing or ambiguous intersections have no marker; guide points are never used
+as substitutes. Before first approval, only completed independent detections are
+available for export, with the current edits applied to frame zero.
+
+The MP4 is a **30 fps preview**, with one output frame per available source image;
+numbering gaps are not filled. This playback speed is separate from the sampling
+rate used for velocity and acceleration. Odd image dimensions are padded by one
+pixel on the right/bottom for the MP4 encoder, preserving all image coordinates.
+The encoder uses the existing OpenCV dependency. Failed exports leave any existing
+video intact.
 
 **Export CSV** includes saved drafts and never confirms a frame. `nodes.csv`
 contains intersections of the fitted horizontal and vertical Bezier curves,
@@ -215,6 +266,7 @@ The initial Git commit preserves retired growth/Fourier/filter experiments,
 standalone stage commands, and the older batch/PDF reporting workflow.
 
 - `gridtracker.py`, `launch_gridtracker.py`: command-line and native chooser entry points.
+- `bootstrap_gridtracker.py`: automatic local environment setup and startup diagnostics.
 - `run_temporal.py`: detection caching, workers, and tracking orchestration.
 - `detection.py`, `string_color.py`, and focused scientific modules: image analysis.
 - `pipeline.py`: scientific stage ordering and optional diagnostics.
@@ -222,6 +274,7 @@ standalone stage commands, and the older batch/PDF reporting workflow.
 - `session_data.py`: identities, validation, hashes, and atomic JSON persistence.
 - `node_editor.py`, `reference_editor.py`, `tracking_review.py`: shared editing and review.
 - `review_session.py`: human anchors, reanalysis, kinematics, and CSV exports.
+- `video_export.py`: MP4 previews of fitted crossings.
 - `mesh_hints.py`, `calibration.py`: advisory gaps and physical scale.
 
 Run the tests without opening a GUI:

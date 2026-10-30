@@ -15,12 +15,13 @@ def configure_backend(name):
 class ReferenceEditor(NodeEditor):
     def __init__(self, result, path, poll=None, *, nodes=None, roster=None, next_id=None,
                  fps=None, on_approve=None, validate_callback=None, frame=0,
-                 figure=None, axes=None, on_cancel=None, on_export=None, output=None, keep_open=False):
+                 figure=None, axes=None, on_cancel=None, on_export=None, on_export_video=None, output=None, keep_open=False):
         import matplotlib.pyplot as plt
         from plot_widgets import Button, TextBox
         from help_panel import HelpPanel
         self.embedded, self.keep_open = figure is not None, keep_open
         self.on_cancel, self.on_export = on_cancel, on_export
+        self.on_export_video = on_export_video
         self.on_approve, self.validate_callback = on_approve, validate_callback
         self.calibration_panel = None
         fig, ax = (figure, axes) if self.embedded else plt.subplots(figsize=(15, 8))
@@ -40,13 +41,15 @@ class ReferenceEditor(NodeEditor):
         self.help = HelpPanel(fig)
         self.help_button = Button(fig.add_axes([.04, .115, .08, .035]), 'Help')
         self.help_button.on_clicked(self.toggle_help)
-        self.calibration_button = Button(fig.add_axes([.29, .01, .13, .04]), 'Calibrate length')
+        self.calibration_button = Button(fig.add_axes([.28, .01, .12, .04]), 'Calibrate length')
         self.calibration_button.on_clicked(self.calibrate)
-        self.export_button = Button(fig.add_axes([.44, .01, .13, .04]), 'Export CSV')
+        self.export_button = Button(fig.add_axes([.42, .01, .11, .04]), 'Export CSV')
         self.export_button.on_clicked(self.export)
-        self.cancel_button = Button(fig.add_axes([.59, .01, .13, .04]), 'Cancel')
+        self.video_button = Button(fig.add_axes([.55, .01, .11, .04]), 'Export MP4')
+        self.video_button.on_clicked(self.export_video)
+        self.cancel_button = Button(fig.add_axes([.68, .01, .10, .04]), 'Cancel')
         self.cancel_button.on_clicked(self.cancel)
-        self.approve_button = Button(fig.add_axes([.76, .01, .22, .04]), 'Approve and track' if on_approve is None else 'Confirm frame')
+        self.approve_button = Button(fig.add_axes([.80, .01, .18, .04]), 'Approve and track' if on_approve is None else 'Confirm frame')
         self.approve_button.on_clicked(self.approve)
         self.own_axes = [a for a in fig.axes if a is not ax and a not in [p[0] for p in self.previous]]
         self.own_texts = [t for t in fig.texts if t not in [p[0] for p in self.previous]]
@@ -84,7 +87,7 @@ class ReferenceEditor(NodeEditor):
     def dispose(self):
         from plot_widgets import disconnect_widgets
         super().dispose()
-        disconnect_widgets((self.approve_button, self.cancel_button, self.export_button, self.calibration_button, self.help_button, self.fps_box))
+        disconnect_widgets((self.approve_button, self.cancel_button, self.export_button, self.video_button, self.calibration_button, self.help_button, self.fps_box))
         for artist in self.own_axes+self.own_texts:
             artist.remove()
         for artist, visible in self.previous:
@@ -111,6 +114,18 @@ class ReferenceEditor(NodeEditor):
             self.fps = parse_fps(self.fps_box.text)
             paths = self.on_export(self.nodes, self.fps)
             self.status.set_text(f'CSV exported to {paths[0].parent}')
+        except ValueError as error:
+            self.status.set_text(str(error))
+        self.fig.canvas.draw_idle()
+
+    def export_video(self, event=None):
+        if not self.active or self.on_export_video is None:
+            return
+        try:
+            self.fps = parse_fps(self.fps_box.text)
+            self.autosave()
+            path = self.on_export_video(self.nodes, self.fps)
+            self.status.set_text(f'MP4 exported from completed frames to {path} (30 fps playback)')
         except ValueError as error:
             self.status.set_text(str(error))
         self.fig.canvas.draw_idle()

@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -7,6 +8,14 @@ from launch_gridtracker import FolderChooser, main
 
 
 class LauncherTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.state_path = Path(temporary.name)/'.launcher_state.json'
+        state = patch('launch_gridtracker.STATE_PATH', self.state_path)
+        state.start()
+        self.addCleanup(state.stop)
+
     def chooser(self, source='', output='', same=True):
         chooser = FolderChooser.__new__(FolderChooser)
         chooser.root = Mock()
@@ -16,6 +25,8 @@ class LauncherTests(unittest.TestCase):
         chooser.same_folder = Mock(get=Mock(return_value=same))
         chooser.output_entry = Mock()
         chooser.output_browse = Mock()
+        for variable in (chooser.input, chooser.output):
+            variable.set.side_effect = lambda value, variable=variable: setattr(variable.get, 'return_value', value)
         return chooser
 
     def test_output_follows_input_until_separate_destination_selected(self):
@@ -33,6 +44,34 @@ class LauncherTests(unittest.TestCase):
         chooser = self.chooser()
         chooser.update_output()
         chooser.output.set.assert_called_once_with('')
+
+    def test_browse_starts_at_parent_and_remembers_each_choice(self):
+        chooser = self.chooser('/data/previous/video', '/data/previous/results', same=False)
+        with patch('tkinter.filedialog.askdirectory', return_value='/data/new/video') as browse:
+            chooser.choose_input()
+            self.assertEqual(browse.call_args.kwargs['initialdir'], '/data/previous')
+        saved = json.loads(self.state_path.read_text())
+        self.assertEqual(saved['input'], '/data/new/video')
+        with patch('tkinter.filedialog.askdirectory', return_value='/data/new/results') as browse:
+            chooser.choose_output()
+            self.assertEqual(browse.call_args.kwargs['initialdir'], '/data/previous')
+        saved = json.loads(self.state_path.read_text())
+        self.assertEqual(saved, dict(input='/data/new/video', output='/data/new/results', same_folder=False))
+        with patch('tkinter.filedialog.askdirectory', return_value='') as browse:
+            chooser.choose_input()
+            self.assertEqual(browse.call_args.kwargs['initialdir'], '/data/new')
+        self.assertEqual(json.loads(self.state_path.read_text()), saved)
+
+    def test_saved_folders_are_restored_when_reopening_the_launcher(self):
+        chooser = self.chooser('/data/video', '/data/results', same=False)
+        chooser.save_folders()
+        with patch('tkinter.StringVar') as string, patch('tkinter.BooleanVar') as boolean, \
+             patch('tkinter.ttk.Label'), patch('tkinter.ttk.Entry'), patch('tkinter.ttk.Button'), \
+             patch('tkinter.ttk.Checkbutton'):
+            boolean.return_value.get.return_value = False
+            reopened = FolderChooser(Mock())
+        self.assertEqual([call.kwargs['value'] for call in string.call_args_list], ['/data/video', '/data/results'])
+        self.assertFalse(boolean.call_args.kwargs['value'])
 
     def test_start_validates_input_and_accepts_new_output_folder(self):
         with TemporaryDirectory() as directory:
