@@ -17,14 +17,24 @@ def node_marker(node):
 class NodeEditor:
     def __init__(self, result, path, fig, ax, fps_box, *, nodes=None, roster=None,
                  next_id=None, fps=None, frame=0, output=None, poll=None,
-                 on_redraw=None, review=False, restore_fps=True):
+                 on_redraw=None, on_edit=None, review=False, restore_fps=True):
         self.result, self.path = result, Path(path)
         self.fig, self.ax, self.fps_box = fig, ax, fps_box
         self.frame, self.fps, self.active = frame, fps, True
         self.review, self.on_redraw = review, on_redraw
+        self.on_edit = on_edit
         self.output = Path(output) if output is not None else self.path.parent
         self.nodes = deepcopy(nodes) if nodes is not None else [label_node(n, result) for n in result['final_nodes']]
+        if not review:
+            from node_conflicts import resolve_conflicts
+            self.nodes, self.resolved_conflicts = resolve_conflicts(self.nodes, result)
+            for node in self.nodes:
+                node.setdefault('human_edited', False)
+                node.setdefault('status', 'observed')
+                node.setdefault('measured_xy', [node['x'], node['y']])
+                node.setdefault('measurement_source', 'independent_detection')
         self.baseline = deepcopy(self.nodes)
+        self._committed_nodes = deepcopy(self.nodes)
         self.roster = deepcopy(roster if roster is not None else self.nodes)
         self.draft_path = self.path.with_suffix('.draft.json')
         editor_state = {}
@@ -69,6 +79,9 @@ class NodeEditor:
     def autosave(self):
         if self.approved is not None:
             return
+        if not self.dragging and self.on_edit is not None and node_geometry(self.nodes) != node_geometry(self._committed_nodes):
+            self.commit_edits()
+            return
         try:
             self.fps = parse_fps(self.fps_box.text)
         except ValueError:
@@ -86,6 +99,23 @@ class NodeEditor:
             self.autosave()
         return True
 
+    def commit_edits(self):
+        if node_geometry(self.nodes) == node_geometry(self._committed_nodes):
+            return False
+        selected = deepcopy(self.nodes[self.selected]) if self.selected is not None else None
+        if self.on_edit is not None:
+            self.nodes = self.on_edit(self, deepcopy(self._committed_nodes), deepcopy(self.nodes))
+        if selected is not None:
+            self.selected = next((i for i, node in enumerate(self.nodes) if node['id'] == selected['id'] or
+                                  (node['x'], node['y'], node['kind']) == (selected['x'], selected['y'], selected['kind'])), None)
+        self.next_id = max(self.next_id, max((n['id'] for n in self.nodes), default=0)+1)
+        self._committed_nodes = deepcopy(self.nodes)
+        self.baseline = deepcopy(self.nodes)
+        self._last_geometry = node_geometry(self.nodes)
+        self.redraw()
+        self.autosave()
+        return True
+
     def redraw(self):
         from mesh_hints import missing_crossings
         from mesh_hints import identity
@@ -93,17 +123,16 @@ class NodeEditor:
         from fit_bezier_curves import node_available
         geometry = node_geometry(self.nodes)
         baseline = node_geometry(self.baseline)
-        if self.review:
-            originals = {n['id']: n for n in self.baseline}
-            for node in self.nodes:
-                key = node['id']
-                if geometry[key] != self._last_geometry.get(key):
-                    if geometry[key] == baseline.get(key):
-                        for field in ('measured_xy', 'status', 'measurement_source'):
-                            node[field] = originals[key].get(field)
-                    else:
-                        node.update(measured_xy=[node['x'], node['y']], status='draft', measurement_source='human_draft',
-                                    velocity=None, acceleration=None)
+        originals = {n['id']: n for n in self.baseline}
+        for node in self.nodes:
+            key = node['id']
+            if geometry[key] != self._last_geometry.get(key):
+                if geometry[key] == baseline.get(key):
+                    for field in ('measured_xy', 'status', 'measurement_source', 'human_edited'):
+                        node[field] = originals[key].get(field)
+                else:
+                    node.update(measured_xy=[node['x'], node['y']], status='draft', measurement_source='human_draft', human_edited=True,
+                                velocity=None, acceleration=None)
         self.modified = geometry != baseline
         self._last_geometry = geometry
         points = np.array([[n['x'], n['y']] for n in self.nodes]).reshape(-1, 2)
@@ -165,6 +194,7 @@ class NodeEditor:
     def release(self, event):
         self.dragging = False
         if self.active:
+            self.commit_edits()
             self.autosave()
 
     def move(self, event):
@@ -220,9 +250,7 @@ class NodeEditor:
             known = next((n for n in self.roster if identity(n) == identity(node)), None)
             if known is not None:
                 node['id'] = known['id']
-                if self.review:
-                    from fit_bezier_curves import node_available
-                    self.nodes = [n for n in self.nodes if n['id'] != node['id'] or node_available(n)]
+                self.nodes = [n for n in self.nodes if n['id'] != node['id']]
             else:
                 self.next_id += 1
             self.nodes.append(node)
@@ -231,11 +259,13 @@ class NodeEditor:
             edited = False
         self.redraw()
         if edited:
+            self.commit_edits()
             self.autosave()
 
     def close(self, event=None):
         self.timer.stop()
         if not self._disposed:
+            self.commit_edits()
             self.autosave()
 
     def dispose(self):

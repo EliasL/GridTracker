@@ -103,13 +103,14 @@ def save_reference(path, result, nodes, approved, fps=None, *, editor_state=None
         validate_nodes(nodes, result['image_size'], require_crossing=result.get('frame', 0) == 0)
         nodes = deepcopy(nodes)
         for node in nodes:
-            if 'measured_xy' in node:
+            if 'measured_xy' in node and node.get('human_edited', True):
                 node.update(measured_xy=[node['x'], node['y']], velocity=None, acceleration=None,
                             status='verified', measurement_source='human')
     document = dict(source=result['source'], source_sha256=file_hash(result['source']),
                     analysis_sha256=analysis_hash(result), image_size=result['image_size'],
                     approved=approved, approved_at=datetime.now(timezone.utc).isoformat() if approved else None,
                     nodes=nodes, fps=parse_fps(fps), frame=result.get('frame', 0))
+    document['verification_scope'] = 'edited_nodes' if nodes and all('human_edited' in n for n in nodes) else 'frame'
     if editor_state is not None:
         document['editor_state'] = editor_state
     path = Path(path)

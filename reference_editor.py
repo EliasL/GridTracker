@@ -1,7 +1,8 @@
-"""Human approval of the first frame; importing this module never opens a GUI."""
+"""First-frame setup with immediate per-node human edits; imports never open a GUI."""
 from node_editor import NodeEditor
 from PIL import Image, ImageEnhance, ImageOps
 from session_data import parse_fps, save_reference, save_ui_state
+from message_panel import MessagePanel
 
 
 def configure_backend(name):
@@ -30,13 +31,15 @@ class ReferenceEditor(NodeEditor):
         for artist, _ in self.previous:
             artist.set_visible(False)
         ax.clear()
-        fig.canvas.manager.set_window_title(f'GridTracker — verify first frame')
+        fig.canvas.manager.set_window_title('GridTracker — set up the first frame')
         fig.subplots_adjust(bottom=.17, top=.90)
         with Image.open(result['source']) as source_image:
             image = ImageOps.exif_transpose(source_image).convert('RGB')
         ax.imshow(ImageEnhance.Brightness(image).enhance(3))
         ax.set_axis_off()
-        self.status = fig.text(.02, .075, 'Edits autosave. Confirm the first frame to initialize tracking.', color='#222222')
+        self.messages = MessagePanel(fig, [.02, .055, .96, .055])
+        self.status = self.messages.channel('message')
+        self.status.set_text('Node edits are saved immediately. Start tracking when ready.')
         fps_box = TextBox(fig.add_axes([.13, .01, .10, .035]), 'Frames / second ', initial='' if fps is None else str(fps))
         self.help = HelpPanel(fig)
         self.help_button = Button(fig.add_axes([.04, .115, .08, .035]), 'Help')
@@ -49,12 +52,32 @@ class ReferenceEditor(NodeEditor):
         self.video_button.on_clicked(self.export_video)
         self.cancel_button = Button(fig.add_axes([.68, .01, .10, .04]), 'Cancel')
         self.cancel_button.on_clicked(self.cancel)
-        self.approve_button = Button(fig.add_axes([.80, .01, .18, .04]), 'Approve and track' if on_approve is None else 'Confirm frame')
+        self.approve_button = Button(fig.add_axes([.80, .01, .18, .04]), 'Start tracking')
         self.approve_button.on_clicked(self.approve)
         self.own_axes = [a for a in fig.axes if a is not ax and a not in [p[0] for p in self.previous]]
-        self.own_texts = [t for t in fig.texts if t not in [p[0] for p in self.previous]]
+        self.own_texts = [t for t in fig.texts if t not in [p[0] for p in self.previous] and t is not self.messages.artist]
         super().__init__(result, path, fig, ax, fps_box, nodes=nodes, roster=roster, next_id=next_id,
-                         fps=fps, frame=frame, output=output, poll=poll)
+                         fps=fps, frame=frame, output=output, poll=poll, on_edit=self.edited)
+        self.commit_edits()
+
+    def edited(self, editor, before, nodes):
+        from copy import deepcopy
+        from node_conflicts import resolve_conflicts
+        from session_data import node_geometry
+        old = node_geometry(before)
+        changed = {n['id'] for n in nodes if node_geometry([n])[n['id']] != old.get(n['id'])}
+        for node in nodes:
+            if node['id'] in changed:
+                node.update(human_edited=True, status='verified', measurement_source='human',
+                            measured_xy=[node['x'], node['y']])
+        try:
+            nodes, rejected = resolve_conflicts(nodes, self.result, changed)
+            save_reference(self.path, self.result, nodes, approved=True, fps=self.fps)
+        except ValueError as error:
+            self.status.set_text(f'Edit could not be applied: {error}')
+            return before
+        self.status.set_text(f'Saved human edits; {len(rejected)} duplicate candidates resolved.')
+        return deepcopy(nodes)
 
     def toggle_help(self, event=None):
         self.help.toggle()
@@ -87,6 +110,7 @@ class ReferenceEditor(NodeEditor):
     def dispose(self):
         from plot_widgets import disconnect_widgets
         super().dispose()
+        self.messages.close()
         disconnect_widgets((self.approve_button, self.cancel_button, self.export_button, self.video_button, self.calibration_button, self.help_button, self.fps_box))
         for artist in self.own_axes+self.own_texts:
             artist.remove()
@@ -100,7 +124,9 @@ class ReferenceEditor(NodeEditor):
         from calibration import CalibrationPanel
         self.fps_box.stop_typing()
         self.active = False
+        self.messages.set_visible(False)
         def done(document):
+            self.messages.set_visible(True)
             self.active, self.calibration_panel = True, None
             if document is not None:
                 self.status.set_text(f"Calibration saved: {document['units_per_pixel']:.6g} {document['unit']}/pixel")
@@ -113,7 +139,7 @@ class ReferenceEditor(NodeEditor):
         try:
             self.fps = parse_fps(self.fps_box.text)
             paths = self.on_export(self.nodes, self.fps)
-            self.status.set_text(f'CSV exported to {paths[0].parent}')
+            self.messages.set(f'CSV exported to {paths[0].parent}', path=paths[0].parent)
         except ValueError as error:
             self.status.set_text(str(error))
         self.fig.canvas.draw_idle()
@@ -125,7 +151,7 @@ class ReferenceEditor(NodeEditor):
             self.fps = parse_fps(self.fps_box.text)
             self.autosave()
             path = self.on_export_video(self.nodes, self.fps)
-            self.status.set_text(f'MP4 exported from completed frames to {path} (30 fps playback)')
+            self.messages.set(f'MP4 exported from completed frames to {path} (30 fps playback)', path=path.parent)
         except ValueError as error:
             self.status.set_text(str(error))
         self.fig.canvas.draw_idle()
@@ -144,7 +170,8 @@ class ReferenceEditor(NodeEditor):
 
     def close(self, event):
         self.timer.stop()
-        if self.approved is None:
+        if self.approved is None and not self._disposed:
+            self.commit_edits()
             self.autosave()
         if self.keep_open:
             self.fig.canvas.stop_event_loop()

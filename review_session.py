@@ -1,6 +1,7 @@
 """Persistent human anchors, reanalysis, and exports with explicit estimates."""
 from copy import deepcopy
 import csv
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -75,12 +76,18 @@ class ReviewSession:
         self.anchors = {0: deepcopy(reference)}
         self.fps = parse_fps(fps if fps is not None else reference.get('fps'))
         self.dirty = False
+        self.edits = {}
+        if reference.get('verification_scope') == 'edited_nodes':
+            initial_edits = {n['id']: deepcopy(n) for n in reference['nodes'] if n.get('human_edited')}
+            if initial_edits:
+                self.edits[0] = initial_edits
         if self.path.exists():
             state = json.loads(self.path.read_text())
             if state['source_sha256'] != [r['source_sha256'] for r in results]:
                 raise ValueError('Saved review belongs to different input frames')
             self.anchors = {int(k): v for k, v in state['anchors'].items()}
             self.fps, self.dirty = parse_fps(state['fps']), state['dirty']
+            self.edits = {int(i): {int(k): n for k, n in values.items()} for i, values in state.get('node_edits', {}).items()}
             if self.anchors[0] != reference:
                 raise ValueError('Saved first-frame review differs from reference.json; use the matching reference')
         for index, document in self.anchors.items():
@@ -94,9 +101,11 @@ class ReviewSession:
         if self.report is not None:
             self.report['fps'] = self.fps
             for frame in self.report['frames']:
-                frame['human_verified'] = frame['frame'] in self.anchors
+                frame['human_verified'] = (frame['frame'] in self.anchors and
+                                           self.anchors[frame['frame']].get('verification_scope', 'frame') == 'frame')
                 frame['width'] = results[frame['frame']]['width']
             update_kinematics(self.report)
+            self.import_drafts()
         self.save()
 
     def save(self):
@@ -104,9 +113,12 @@ class ReviewSession:
         self.calibration = load_calibration(self.output)
         write_json(self.path, dict(source_sha256=[r['source_sha256'] for r in self.results],
                                    anchors={str(k): v for k, v in self.anchors.items()},
-                                   fps=self.fps, dirty=self.dirty, method=self.method))
+                                   fps=self.fps, dirty=self.dirty, method=self.method, editing_policy_version=2,
+                                   node_edits={str(i): {str(k): n for k, n in values.items()} for i, values in self.edits.items()}))
         if self.report is not None:
             self.report['confirmed_frames'] = sorted(self.anchors)
+            self.report['human_edit_frames'] = sorted(self.edits)
+            self.report['reference_sha256'] = hashlib.sha256(json.dumps(self.anchors[0], sort_keys=True).encode()).hexdigest()
             self.report['needs_reanalysis'] = self.dirty
             self.report['calibration'] = self.calibration
             write_json(self.output/'tracking.json', self.report)
@@ -116,7 +128,145 @@ class ReviewSession:
         if self.report is not None:
             known.update({n['id']: n for f in self.report['frames'] for n in f['nodes']})
         known.update({n['id']: n for d in self.anchors.values() for n in d['nodes']})
+        known.update({n['id']: n for values in self.edits.values() for n in values.values() if n is not None})
         return list(known.values())
+
+    def import_drafts(self):
+        """Migrate only the actual human changes, not stale automatic positions."""
+        plans = []
+        for result in self.results:
+            index = result['frame']
+            path = self.output/'reviews'/f'frame_{index:02d}.draft.json'
+            if not path.exists():
+                continue
+            document = load_draft(path, result)
+            original = node_geometry(self.report['frames'][index]['nodes'])
+            draft = node_geometry(document['nodes'])
+            changed = {key for key in draft if draft[key] != original.get(key)}
+            deleted = set(original)-set(draft)
+            if not (changed or deleted) or not document.get('editor_state', {}).get('modified', True):
+                continue
+            plans.append((index, document, changed, deleted))
+        for index, document, changed, deleted in plans:
+            history = self.output/'reviews'/'history'
+            history.mkdir(parents=True, exist_ok=True)
+            write_json(history/f'editing_policy_migration_{index:02d}_{time.time_ns()}.json', document)
+            current = deepcopy(self.report['frames'][index]['nodes'])
+            desired = [n for n in current if n['id'] not in changed | deleted]
+            desired += [n for n in document['nodes'] if n['id'] in changed]
+            self.apply_edit(index, current, desired, save=False)
+
+    def apply_edit(self, index, before, nodes, *, fps=_SESSION_FPS, save=True):
+        from node_conflicts import resolve_conflicts
+        from session_data import save_reference
+        old, current = node_geometry(before), node_geometry(nodes)
+        changed = {key for key in current if current[key] != old.get(key)}
+        deleted = set(old)-set(current)
+        nodes = deepcopy(nodes)
+        # Reuse the established ID for an edited grid identity, including relabeling.
+        roster = {identity(n): n for n in self.roster()}
+        used = {n['id'] for n in self.roster()+nodes}
+        next_id = max(used, default=0)+1
+        promoted = {}
+        for node in nodes:
+            if node['id'] not in changed:
+                continue
+            previous_id = node['id']
+            known = roster.get(identity(node))
+            if known is not None:
+                node['id'] = known['id']
+            elif previous_id in old and identity(node) != identity(next(n for n in before if n['id'] == previous_id)):
+                node['id'], next_id = next_id, next_id+1
+            if previous_id != node['id'] and previous_id in old:
+                deleted.add(previous_id)
+            node.update(human_edited=True, status='verified', measurement_source='human',
+                        measured_xy=[node['x'], node['y']], filtered_xy=[node['x'], node['y']],
+                        prediction_xy=None, velocity=None, acceleration=None, missed=0, reason=None,
+                        last_observed_frame=index)
+            promoted[node['id']] = node
+        nodes = [n for n in nodes if n['id'] not in promoted or n is promoted[n['id']]]
+        preferred = set(promoted)
+        nodes, rejected = resolve_conflicts(nodes, self.results[index], preferred)
+        validate_nodes(nodes, self.results[index]['image_size'], require_crossing=index == 0)
+        changes = {n['id']: deepcopy(n) for n in nodes if n['id'] in preferred}
+        deleted |= set(old)-{n['id'] for n in nodes}
+        changes.update({key: None for key in deleted if key not in changes})
+        if not changes:
+            return nodes
+        prospective = deepcopy(self.edits)
+        prospective.setdefault(index, {}).update(changes)
+        definitions = {i: dict(nodes=[n for n in values.values() if n is not None]) for i, values in prospective.items()}
+        validate_roster({**{i: doc for i, doc in self.anchors.items() if i != index}, **definitions})
+        self.edits = prospective
+        if fps is not _SESSION_FPS:
+            self.fps = parse_fps(fps)
+        self.dirty = True
+        frame = self.report['frames'][index]
+        frame['nodes'] = nodes
+        frame.setdefault('resolved_conflicts', []).extend(rejected)
+        frame['deleted_node_ids'] = [key for key, value in self.edits[index].items() if value is None]
+        frame['human_edited_ids'] = [key for key, value in self.edits[index].items() if value is not None]
+        if index in self.anchors:
+            self.anchors[index] = save_reference(self.output/('reference.json' if index == 0 else f'reviews/frame_{index:02d}.json'),
+                                                 self.results[index], nodes, True, self.fps)
+        self.refit(frame)
+        affected = self.quick_update(index, changes)
+        self.report['fps'] = self.fps
+        update_kinematics(self.report)
+        if save:
+            for i in {index, *affected}:
+                write_json(self.output/f'tracked_{i:02d}.json', self.report['frames'][i])
+            self.save()
+        return deepcopy(nodes)
+
+    def refit(self, frame):
+        from fit_bezier_curves import fit_labeled_curves
+        frame['curves'], frame['ignored_curves'] = fit_labeled_curves(frame['nodes'], frame['image_size'], frame['width'])
+        frame['counts'] = {status: sum(n['status'] == status for n in frame['nodes'])
+                           for status in ('verified', 'observed', 'recovered', 'held', 'predicted', 'lost', 'outside')}
+
+    def quick_update(self, index, changes):
+        """Only carry edits through missing data, stopping at the next observation."""
+        active, affected = dict(changes), set()
+        for frame in self.report['frames'][index+1:]:
+            i = frame['frame']
+            if i in self.anchors:
+                break
+            for key in self.edits.get(i, {}):
+                active.pop(key, None)
+            by_id = {n['id']: n for n in frame['nodes']}
+            refit = False
+            for key, source in list(active.items()):
+                existing = by_id.get(key)
+                if existing is not None and (existing.get('measured_xy') is not None or existing.get('human_edited')):
+                    active.pop(key)
+                    continue
+                if source is None:
+                    if existing is not None:
+                        frame['nodes'].remove(existing)
+                        refit |= existing['kind'] == 'edge'
+                        affected.add(i)
+                    continue
+                held = dict(existing if existing is not None else source,
+                            x=source['x'], y=source['y'], measured_xy=None, human_edited=False,
+                            status='held' if source['kind'] == 'edge' else 'predicted',
+                            measurement_source=None, reason='held_from_human_edit',
+                            prediction_xy=[source['x'], source['y']], filtered_xy=[source['x'], source['y']],
+                            velocity=None, acceleration=None, last_observed_frame=index)
+                if existing is None:
+                    frame['nodes'].append(held)
+                else:
+                    existing.clear()
+                    existing.update(held)
+                affected.add(i)
+                refit |= source['kind'] == 'edge'
+            if refit:
+                self.refit(frame)
+            elif i in affected:
+                frame['counts'] = {status: sum(n['status'] == status for n in frame['nodes']) for status in frame['counts']}
+            if not active:
+                break
+        return affected
 
     def validate_edit(self, index, nodes):
         validate_nodes(nodes, self.results[index]['image_size'], require_crossing=index == 0)
@@ -149,23 +299,24 @@ class ReviewSession:
     def unmark(self, index):
         if index == 0:
             raise ValueError('The first frame remains the human reference; edit its nodes and confirm to correct it')
-        if index not in self.anchors:
+        if index not in self.anchors and index not in self.edits:
             return False
         history = self.output/'reviews'/'history'
         history.mkdir(parents=True, exist_ok=True)
         stamp = time.time_ns()
-        write_json(history/f'frame_{index:02d}_{stamp}_anchor.json', self.anchors[index])
+        write_json(history/f'frame_{index:02d}_{stamp}_anchor.json', dict(anchor=self.anchors.get(index), edits=self.edits.get(index)))
         for suffix in ('.json', '.draft.json'):
             path = self.output/'reviews'/f'frame_{index:02d}{suffix}'
             if path.exists():
                 path.replace(history/f'{stamp}_{path.name}')
-        del self.anchors[index]
+        self.anchors.pop(index, None)
+        self.edits.pop(index, None)
         self.dirty = True
         if self.report is not None:
             frame = self.report['frames'][index]
             frame['human_verified'] = False
             for node in frame['nodes']:
-                node.update(status='held' if node['kind'] == 'edge' else 'predicted', measured_xy=None,
+                node.update(status='held' if node['kind'] == 'edge' else 'predicted', measured_xy=None, human_edited=False,
                             measurement_source=None, velocity=None, acceleration=None, reason='frame_unmarked_pending_reanalysis')
             frame['counts'] = {status: sum(n['status'] == status for n in frame['nodes']) for status in frame['counts']}
             update_kinematics(self.report)
@@ -176,12 +327,20 @@ class ReviewSession:
         from run_temporal import propagate
         snapshots = {i: deepcopy(d['nodes']) for i, d in self.anchors.items()}
         report = propagate(self.results, self.anchors[0], self.output, self.fps, self.method, confirmed=self.anchors,
-                           progress=progress, frame_range=frame_range, previous_report=self.report)
+                           progress=progress, frame_range=frame_range, previous_report=self.report, edits=self.edits)
         for index, expected in snapshots.items():
             actual = [{k: n[k] for k in ('id', 'x', 'y', 'row', 'column', 'kind')} for n in report['frames'][index]['nodes']]
             frozen = [{k: n[k] for k in ('id', 'x', 'y', 'row', 'column', 'kind')} for n in expected]
             if actual != frozen:
                 raise RuntimeError(f'Reanalysis changed confirmed frame {index}')
+        for index, values in self.edits.items():
+            actual = {n['id']: n for n in report['frames'][index]['nodes']}
+            for key, expected in values.items():
+                if expected is None:
+                    if key in actual:
+                        raise RuntimeError(f'Reanalysis restored deleted node {key} in frame {index}')
+                elif key not in actual or node_geometry([actual[key]]) != node_geometry([expected]):
+                    raise RuntimeError(f'Reanalysis changed human node {key} in frame {index}')
         self.report, self.dirty = report, self.dirty if frame_range is not None else False
         self.save()
         return report
@@ -282,6 +441,7 @@ def export_report(report, results, output, path=None):
     time_unit = 'second' if report.get('fps') is not None else 'frame'
     for frame in report['frames']:
         base = dict(frame=frame['frame'], frame_offset=frame.get('frame_offset', frame['frame']), source=frame['source'],
+                    original_source=frame.get('original_source', frame['source']), rotation_degrees=frame.get('rotation_degrees', 0.),
                     time=frame['time'], time_unit=report['time_unit'], fps=report.get('fps'), human_verified=frame['human_verified'],
                     id_scope='video' if report.get('identities_linked', True) else 'frame',
                     needs_reanalysis=report.get('needs_reanalysis', False), length_unit=unit, units_per_pixel=scale)
@@ -332,8 +492,8 @@ def detection_snapshot(results, nodes, fps):
         draft = nodes if result['frame'] == 0 else [label_node(n, result) for n in result['final_nodes']]
         frames.append(dict(frame=result['frame'], frame_offset=result.get('frame_offset', result['frame']),
                            source=result['source'], image_size=result['image_size'], human_verified=False,
-                           nodes=[dict(n, measured_xy=[n['x'], n['y']], status='draft' if result['frame'] == 0 else 'detected',
-                                       measurement_source='human_draft' if result['frame'] == 0 else 'independent_detection') for n in draft],
+                           nodes=[dict(n, measured_xy=[n['x'], n['y']], status='verified' if n.get('human_edited') else 'detected',
+                                       measurement_source='human' if n.get('human_edited') else 'independent_detection') for n in draft],
                            curves=[], ignored_curves=[]))
         frames[-1]['curves'], frames[-1]['ignored_curves'] = fit_labeled_curves(frames[-1]['nodes'], result['image_size'], result['width'])
     return dict(fps=fps, identities_linked=False, frames=frames)

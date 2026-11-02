@@ -53,7 +53,7 @@ class ReferenceTests(unittest.TestCase):
                             dict(node, id=4, row=1, y=60),
                             dict(node, id=5, row=1, column=1, x=70, y=60)], [100, 100])
 
-    def test_editing_drag_add_delete_undo_and_unapproved_resume(self):
+    def test_editing_drag_add_delete_undo_and_human_edit_resume(self):
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
@@ -74,7 +74,8 @@ class ReferenceTests(unittest.TestCase):
             editor.key(SimpleNamespace(key='cmd+z'))
             self.assertEqual(len(editor.nodes), 2)
             editor.close(None)
-            self.assertFalse(editor.path.exists())
+            self.assertTrue(editor.path.exists())
+            self.assertTrue(load_reference(editor.path, result)['nodes'][0]['human_edited'])
             resumed = ReferenceEditor(result, editor.path)
             self.assertEqual(resumed.nodes, editor.nodes)
             resumed.approve(None)
@@ -103,10 +104,13 @@ class ReferenceTests(unittest.TestCase):
             self.assertFalse(saved['approved'])
             editor.dispose()  # Simulate disappearing without the normal close callback.
             resumed = ReferenceEditor(result, path)
-            self.assertEqual(resumed.nodes, saved['nodes'])
+            from session_data import node_geometry
+            self.assertEqual(node_geometry(resumed.nodes), node_geometry(saved['nodes']))
+            self.assertTrue(resumed.nodes[-1]['human_edited'])
+            self.assertEqual(resumed.nodes[-1]['measurement_source'], 'human')
             self.assertEqual(resumed.nodes[resumed.selected]['column'], 2)
             self.assertEqual(resumed.fps_box.text, '1e')
-            self.assertFalse(path.exists())
+            self.assertTrue(path.exists())
             plt.close('all')
 
     def test_older_sessions_resume_the_latest_unconfirmed_draft(self):

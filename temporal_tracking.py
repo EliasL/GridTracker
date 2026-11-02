@@ -12,7 +12,7 @@ from session_data import validate_nodes
 
 cv2.setNumThreads(1)
 cv2.ocl.setUseOpenCL(False)
-TRACKING_POLICY_VERSION = 2
+TRACKING_POLICY_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -104,11 +104,37 @@ class NodeTracker:
                     template=patch(image, xy, self.radius), velocity=None)
 
     def initial(self, nodes=None):
-        return [dict(n, status='verified', measurement_source='human', measured_xy=[n['x'], n['y']],
+        return [dict(n, status='verified' if n.get('human_edited', True) else 'observed',
+                     measurement_source='human' if n.get('human_edited', True) else 'independent_detection',
+                     measured_xy=[n['x'], n['y']],
                      filtered_xy=[n['x'], n['y']], prediction_xy=None, missed=0, velocity=None,
                      acceleration=None, measurement_velocity=None, position_sd=self.width/3,
                      reason=None, detection_id=n['id'], correlation=None, forward_backward_error=None,
                      last_observed_frame=self.frame, observations=1) for n in (self.nodes if nodes is None else nodes)]
+
+    def constrain(self, edits, image, records):
+        """Update just the edited tracks; other observations keep their own evidence."""
+        records = {n['id']: n for n in records}
+        for key, node in edits.items():
+            position = next((i for i, n in enumerate(self.nodes) if n['id'] == key), None)
+            if node is None:
+                records.pop(key, None)
+                if position is not None:
+                    track = self.tracks[position]
+                    track['missed'] = self.config.max_missing+1
+                    track['velocity'] = None
+                    track['mean'][2:] = 0
+                continue
+            validate_nodes([node], self.size.tolist(), require_crossing=False)
+            node = dict(node, human_edited=True)
+            if position is None:
+                self.nodes.append(node)
+                self.tracks.append(self.new_track(node, image))
+            else:
+                self.nodes[position] = node
+                self.tracks[position] = self.new_track(node, image)
+            records[key] = self.initial([node])[0]
+        return list(records.values())
 
     def anchor(self, nodes, image, dt=None):
         """Apply exact human positions; absent identities remain recoverable."""
@@ -289,7 +315,7 @@ class NodeTracker:
                 if node['kind'] == 'edge':
                     reasons[i] = 'edge_not_identified_position_held'
                 track['velocity'] = None
-            record = dict(node, x=float(xy[0]), y=float(xy[1]), status=status, missed=track['missed'],
+            record = dict(node, x=float(xy[0]), y=float(xy[1]), status=status, missed=track['missed'], human_edited=False,
                           measured_xy=xy.tolist() if observation else None,
                           prediction_xy=predictions[i].tolist(), filtered_xy=track['mean'][:2].tolist(),
                           position_sd=float(np.sqrt(np.max(np.diag(track['covariance'])[:2]))), search_radius=gates[i],
@@ -377,6 +403,10 @@ def reconcile_nodes(forward, backward, definitions, width):
             result.append(dict(a if a is not None else b))
             continue
         best = max(observed, key=lambda n: (n.get('correlation') or 0)+(.02 if n['measurement_source'] == 'detection' else 0))
+        manual = [n for n in observed if n.get('human_edited')]
+        if manual:
+            result.append(dict(manual[0]))
+            continue
         chosen = dict(best, temporal_direction='forward' if best is a else 'backward')
         if len(observed) == 2 and np.linalg.norm(np.array(a['measured_xy'])-b['measured_xy']) > 2*width:
             chosen.update(status='predicted', measured_xy=None, velocity=None, acceleration=None,
@@ -385,6 +415,8 @@ def reconcile_nodes(forward, backward, definitions, width):
     base = [definitions[n['id']] for n in result]
     proposals = {i: dict(xy=np.array(n['measured_xy'])) for i, n in enumerate(result) if n['measured_xy'] is not None}
     for i in topology_conflicts(base, proposals, width):
+        if result[i].get('human_edited'):
+            continue
         result[i].update(status='predicted', measured_xy=None, velocity=None, acceleration=None,
                          measurement_source=None, reason='grid_identity_conflict')
     return result
@@ -392,14 +424,23 @@ def reconcile_nodes(forward, backward, definitions, width):
 
 def hold_missing_positions(frames):
     """Apply the same last-observation rule after bidirectional reconciliation."""
-    last = {}
+    last, deleted = {}, set()
     for frame in frames:
+        for key in frame.get('deleted_node_ids', []):
+            last.pop(key, None)
+            deleted.add(key)
+        kept = []
         for node in frame['nodes']:
             if node.get('measured_xy') is not None:
+                deleted.discard(node['id'])
                 last[node['id']] = list(node['measured_xy'])
+            elif node['id'] in deleted:
+                continue
             elif node['id'] in last:
                 node['x'], node['y'] = last[node['id']]
                 node['filtered_xy'] = list(last[node['id']])
                 node['velocity'], node['acceleration'] = None, None
                 if node['kind'] == 'edge' and node.get('status') != 'human_absent':
                     node.update(status='held', reason='edge_not_identified_position_held')
+            kept.append(node)
+        frame['nodes'] = kept

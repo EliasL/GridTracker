@@ -84,6 +84,25 @@ For explicitly selected legacy destinations sharing the input folder, the reserv
 `tracking_overview.png`, `calibration_image.png`, and `calibration_input.png` files
 are excluded from frame discovery.
 
+Before detecting a new sequence, GridTracker estimates one rotation by maximizing
+row/column concentration of grid contrast. If the correction exceeds **0.5°**, a
+rotation editor opens with the optimized value prefilled. Enter the correction
+in degrees (positive is counterclockwise), press Enter to preview, and select
+**Use rotation and crop**. The original view outlines the retained region; the
+second view shows the exact corrected crop and dimensions. Closing cancels before
+analysis.
+
+The same rotation and largest centered valid crop apply to every frame. Originals
+remain untouched; lossless corrected images live in `rotated_frames/`, with the
+recipe and original hashes in `rotation.json`. Detection, editing, tracking, CSV,
+and MP4 use this corrected coordinate system. CSVs record `original_source` and
+`rotation_degrees`. Existing sessions keep their saved orientation; choose a new
+results folder to change it without invalidating old edits.
+
+For unattended preparation, pass `--rotation DEGREES` explicitly when the estimated
+misalignment exceeds the threshold; `--rotation 0` keeps original pixels. Smaller
+misalignments are left unchanged without opening a window.
+
 Four single-threaded detector processes run by default (`--workers` changes the
 count). Frame zero is submitted first so it can be edited while detection of the
 remaining frames continues. `--method position` selects a previous-position
@@ -92,8 +111,8 @@ baseline instead of optical flow and velocity prediction.
 ## Editing and review
 
 First-frame setup, node editing, frame review, and length calibration share one
-window. First-frame approval is required before tracking. Later frames each have
-an explicit confirmation state.
+window. **Start tracking** initializes propagation from the first-frame grid;
+it does not confirm untouched detections. There is no **Confirm frame** button.
 
 - Drag a node to move it; right-click or Delete removes it.
 - With the pointer over the image, `a` adds a crossing and `e` adds an endpoint
@@ -113,33 +132,48 @@ an explicit confirmation state.
 - Use the slider or arrow keys to change frames. Select **Help** for instructions.
 - Toolbar zoom/pan disables node manipulation until deselected.
 
-Edits autosave atomically as unconfirmed drafts, including incomplete frame-rate
-text, selection, labels, zoom, and the ID allocator. Dragging checkpoints every
-500 ms and on release. Closing saves a draft without approving it. Approval checks
-for duplicate identities, reversed string order, and inconsistent boundary data.
-References are bound to image hashes and the detection results.
+Moving, adding, deleting, or relabeling a node saves the change immediately.
+Moved and added nodes become **human references individually**, without freezing
+other nodes in the same frame. A completed drag commits on release; in-progress
+drags checkpoint every 500 ms. Incomplete frame-rate text is preserved without
+blocking node edits or undo. Saved older drafts are migrated by their actual node
+changes, with originals retained in `reviews/history/`.
 
-**Confirm frame** fixes the current observations and edits as a human reference,
-then advances to the next unconfirmed frame. Changes to a confirmed frame remain
-drafts until confirmed again. Held edge endpoints are included; missing interior
-positions require an explicit edit to become observations.
+Every edit also performs a **quick forward update**: the edited position is
+carried through subsequent held/missing instances of that node, stopping at its
+next reliable observation or human edit. Other observed nodes keep their
+coordinates. Added nodes appear as missing estimates until observed; deleting a
+node removes subsequent missing guesses until a reliable observation. Quick
+updates do not rerun detection or optical flow, and inferred positions remain
+unobserved with no invented motion measurements.
 
-**Reanalyze all** tracks from human anchors, using forward/backward agreement
-between anchors. Confirmed positions and identities are checked unchanged.
-**Reanalyze next 10** changes only the next ten frames (or remaining frames),
-preserving confirmed frames and everything outside that range. Confirm edits
-before reanalysis to use them as anchors. Changing the sampling rate requires
-full reanalysis.
+**Reanalyze all** reruns tracking with hard constraints on each human-edited node.
+Automatic nodes in an edited frame can still improve. **Reanalyze next 10** uses
+all preceding edits as tracking context, including the immediately previous frame,
+but writes only the next ten frames (or remaining frames). Human-edited coordinates
+and identities are checked unchanged. Changing the sampling rate requires full
+reanalysis. Legacy whole-frame references remain supported.
 
-**Unmark frame** releases a later frame's human constraint and immediately reruns
-tracking. Its former anchor and drafts remain in `reviews/history/`. The first
-frame stays confirmed as the required initialization reference.
+**Reset edits** releases a later frame's human constraints and reruns tracking.
+Previous edits remain in `reviews/history/`. Frame zero is the initialization
+reference; correct its nodes directly or undo the edit.
+
+Duplicate automatic nodes with the same grid identity are resolved using their
+fit to neighboring rows/columns, then appearance/peak evidence. This allows local
+bending rather than enforcing a rigid periodic lattice. The explicitly edited
+node takes priority over an automatic duplicate. Contradictory human identities
+are reported for relabeling instead of silently deleting a human measurement.
+
+Status and export messages wrap inside a bounded panel. Select text and use
+Command-C / Ctrl-C to copy, or Command-A / Ctrl-A to select all. Click an underlined
+output-folder path to open Finder, Explorer, or the Linux file manager; dragging
+over a link selects its text without opening it.
 
 The review legend groups guide nodes into green **Tracked / confirmed**, blue
 **Edited**, and orange **Held / missing**. White dots mark fitted **Grid crossings**.
 Yellow rings mark **Suggestions**, including missing-crossing hints and unclaimed
 candidates; red rings mark **Conflicts**. Detailed tracking statuses remain in the
-saved data. Suggestions never add nodes or block confirmation. Missing-crossing
+saved data. Suggestions never add nodes automatically. Missing-crossing
 hints within two string widths of an image border are suppressed to tolerate
 clipped lines.
 
@@ -182,9 +216,9 @@ includes camera/racket motion, and differentiation can amplify localization nois
 **Export MP4** is a separate button from **Export CSV**, available during first-frame
 setup and subsequent review. It saves `grid_crossings.mp4` in the results folder,
 with white fitted-crossing dots over the same brightened source images used in
-review. It includes saved drafts without confirming frames, and creates no CSVs.
+review. It includes saved drafts without changing human edits, and creates no CSVs.
 Missing or ambiguous intersections have no marker; guide points are never used
-as substitutes. Before first approval, only completed independent detections are
+as substitutes. Before tracking starts, only completed independent detections are
 available for export, with the current edits applied to frame zero.
 
 The MP4 is a **30 fps preview**, with one output frame per available source image;
@@ -194,7 +228,7 @@ pixel on the right/bottom for the MP4 encoder, preserving all image coordinates.
 The encoder uses the existing OpenCV dependency. Failed exports leave any existing
 video intact.
 
-**Export CSV** includes saved drafts and never confirms a frame. `nodes.csv`
+**Export CSV** includes saved edits and does not change human references. `nodes.csv`
 contains intersections of the fitted horizontal and vertical Bezier curves,
 rather than the draggable guide points. IDs such as `r3:c7` preserve row/column
 identity across frames. Coordinates, provenance, velocity, acceleration, units,
@@ -202,8 +236,8 @@ and additional node metadata are exported. Missing or ambiguous intersections
 produce explicit statuses and blank coordinates, breaking motion calculations.
 
 `nodes_curves.csv` contains Bezier controls and fit statistics;
-`nodes_candidates.csv` preserves independent detector candidates. Before first
-approval, completed detections can be exported with IDs local to each frame and
+`nodes_candidates.csv` preserves independent detector candidates. Before tracking
+starts, completed detections can be exported with IDs local to each frame and
 without motion estimates. Edge endpoints constrain fits rather than appearing
 as rows in the main node CSV. Exported crossings are derived measurements;
 verification describes their guide data.
@@ -212,8 +246,7 @@ verification describes their guide data.
 line's endpoints (or its whole body), enter its known length, choose `mm`, `cm`,
 `m`, `µm`, or `in`, and select **Apply to video**. The saved scalar scale applies
 to every frame. CSVs retain pixel values and add physical coordinate, velocity,
-acceleration, and Bezier-control columns. Calibration is independent of node
-confirmation; no physical units are invented when it is unset.
+acceleration, and Bezier-control columns. Calibration is independent of human node edits; no physical units are invented when it is unset.
 
 ## Detection and diagnostic files
 
@@ -255,7 +288,7 @@ A results folder contains detection caches (`detections.json`, `frame_XX/`),
 tracking results (`tracking.json`, `tracked_XX.json`, `tracking_overview.png`),
 human references and drafts (`reference.json`, `reviews/`), the review state
 (`review.json`), calibration and its reference image, the interface cursor
-(`ui_state.json`), and CSV exports. **Keep the complete results folder when
+(`ui_state.json`), rotation settings/corrected frames, and CSV exports. **Keep the complete results folder when
 backing up or moving saved work.** Images are referenced by absolute path and hash.
 
 Existing results formerly mixed into `Archive-2026-10-29/` were moved into its
@@ -275,7 +308,10 @@ standalone stage commands, and the older batch/PDF reporting workflow.
 - `node_editor.py`, `reference_editor.py`, `tracking_review.py`: shared editing and review.
 - `review_session.py`: human anchors, reanalysis, kinematics, and CSV exports.
 - `video_export.py`: MP4 previews of fitted crossings.
-- `mesh_hints.py`, `calibration.py`: advisory gaps and physical scale.
+- `mesh_hints.py`, `node_conflicts.py`: advisory gaps and duplicate resolution.
+- `rotation.py`: orientation estimation, crop preview, and consistent frame preparation.
+- `message_panel.py`: wrapping, selectable status text and folder links.
+- `calibration.py`: physical scale.
 
 Run the tests without opening a GUI:
 

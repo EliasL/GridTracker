@@ -112,6 +112,7 @@ class ReviewWidgetTests(unittest.TestCase):
             for node in viewer.editor.nodes:
                 node['x'] += 12
             viewer.editor.redraw()
+            viewer.editor.commit_edits()
             anchors = deepcopy(session.anchors)
             report = deepcopy(session.report)
             with patch.object(session, 'export_csv', side_effect=AssertionError('CSV must remain separate')):
@@ -147,7 +148,7 @@ class ReviewWidgetTests(unittest.TestCase):
             editor.redraw()
             editor.export_video()
             self.assertIsNone(editor.approved)
-            self.assertFalse(editor.path.exists())
+            self.assertTrue(editor.path.exists())
             self.assertFalse(list(root.glob('*.csv')))
             capture = cv2.VideoCapture(str(root/'grid_crossings.mp4'))
             try:
@@ -172,7 +173,7 @@ class ReviewWidgetTests(unittest.TestCase):
                     viewer.export_video()
             self.assertEqual(viewer.mode, 'review')
             self.assertTrue(viewer.editor.active)
-            self.assertTrue(all(button.get_active() for name, button in viewer.buttons.items() if name != 'Unmark frame'))
+            self.assertTrue(all(button.get_active() for name, button in viewer.buttons.items() if name != 'Reset edits'))
             self.assertIn('failed', viewer.message.get_text())
             plt.close('all')
 
@@ -204,6 +205,8 @@ class ReviewWidgetTests(unittest.TestCase):
             with patch.object(figure.canvas, 'start_event_loop', side_effect=lambda _: editor.approve(None)):
                 reference = editor.show()
             self.assertTrue(reference['approved'])
+            self.assertEqual(reference['verification_scope'], 'edited_nodes')
+            self.assertFalse(any(n['human_edited'] for n in reference['nodes']))
             self.assertTrue(plt.fignum_exists(figure.number))
             session = ReviewSession(results, reference, root)
             session.reanalyze()
@@ -212,7 +215,7 @@ class ReviewWidgetTests(unittest.TestCase):
             self.assertEqual(plt.get_fignums(), figures)
             plt.close('all')
 
-    def test_colored_legend_and_export_without_confirmation(self):
+    def test_colored_legend_and_export_with_automatic_node_confirmation(self):
         with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), matplotlib.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'}):
             root = Path(directory)
             results, reference = make_sequence(root)
@@ -222,35 +225,34 @@ class ReviewWidgetTests(unittest.TestCase):
             colors = [to_rgba(t.get_color()) for t in viewer.legend.get_texts()]
             self.assertIn(to_rgba('lime'), colors)
             self.assertIn(to_rgba('yellow'), colors)
-            self.assertIn(to_rgba('red'), colors)
-            self.assertTrue(viewer.buttons['Export CSV'].get_active())
+            self.assertNotIn('Confirm frame', viewer.buttons)
             viewer.slider.set_val(1)
-            viewer.confirm()
-            self.assertEqual(sorted(session.anchors), [0, 1])
-            self.assertEqual(viewer.state['frame'], 2)
-            viewer.confirm()
-            self.assertTrue(viewer.buttons['Export CSV'].get_active())
+            viewer.editor.nodes[0]['x'] += 2
+            viewer.editor.redraw()
+            viewer.editor.release(None)
+            self.assertEqual(set(session.edits[1]), {0})
+            self.assertEqual(viewer.state['frame'], 1)
             viewer.export()
             self.assertTrue((root/'nodes.csv').exists())
             plt.close('all')
 
-    def test_unmark_button_reanalyzes_the_selected_frame(self):
+    def test_reset_edits_button_reanalyzes_the_selected_frame(self):
         with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), matplotlib.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'}):
             root = Path(directory)
             results, reference = make_sequence(root)
             session = ReviewSession(results, reference, root)
             session.reanalyze()
             viewer = TrackingReview(session.report, session)
-            self.assertFalse(viewer.buttons['Unmark frame'].get_active())
+            self.assertFalse(viewer.buttons['Reset edits'].get_active())
             viewer.slider.set_val(1)
-            viewer.confirm()
-            viewer.slider.set_val(1)
-            self.assertTrue(viewer.buttons['Unmark frame'].get_active())
+            viewer.editor.nodes[0]['x'] += 2
+            viewer.editor.redraw()
+            viewer.editor.release(None)
+            self.assertTrue(viewer.buttons['Reset edits'].get_active())
             viewer.unmark()
-            self.assertNotIn(1, session.anchors)
-            self.assertFalse(session.report['frames'][1]['human_verified'])
+            self.assertNotIn(1, session.edits)
             self.assertFalse(session.dirty)
-            self.assertFalse(viewer.buttons['Unmark frame'].get_active())
+            self.assertFalse(viewer.buttons['Reset edits'].get_active())
             plt.close('all')
 
     def test_always_editable_export_and_calibration_reuse_one_figure(self):
@@ -274,11 +276,11 @@ class ReviewWidgetTests(unittest.TestCase):
             viewer.calibrate()
             self.assertEqual(plt.get_fignums(), figures)
             viewer.calibration_panel.cancel()
-            viewer.confirm()
+            viewer.editor.commit_edits()
             self.assertEqual(viewer.mode, 'review')
             self.assertIsNotNone(viewer.editor)
             self.assertTrue(viewer.editor.active)
-            self.assertIn(1, session.anchors)
+            self.assertIn(1, session.edits)
             self.assertEqual(plt.get_fignums(), figures)
             viewer.calibrate()
             viewer.calibration_panel.cancel()

@@ -1,4 +1,4 @@
-"""Parallel detection, mandatory first-frame approval, sequential node tracking."""
+"""Parallel detection, grid initialization, and tracking with per-node human edits."""
 import os
 for _name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
     os.environ[_name] = '1'
@@ -55,7 +55,7 @@ def detection_signature():
 
 
 def propagate(results, reference, output, fps=_DEFAULT_FPS, method='flow', confirmed=None, progress=None,
-              frame_range=None, previous_report=None):
+              frame_range=None, previous_report=None, edits=None):
     from copy import deepcopy
     import numpy as np
     from PIL import Image, ImageOps
@@ -68,6 +68,7 @@ def propagate(results, reference, output, fps=_DEFAULT_FPS, method='flow', confi
         raise ValueError('Require a complete ordered frame sequence starting at zero')
     validate_reference(reference, results[0])
     anchors = {0: reference, **(confirmed or {})}
+    edits = edits or {}
     definitions = {}
     for index, document in anchors.items():
         if not 0 <= index < len(results):
@@ -77,6 +78,12 @@ def propagate(results, reference, output, fps=_DEFAULT_FPS, method='flow', confi
             definitions[node['id']] = node
     from review_session import validate_roster
     validate_roster(anchors)
+    for index, values in edits.items():
+        if not 0 <= index < len(results):
+            raise ValueError('Human edit frame is outside this sequence')
+        for node in values.values():
+            if node is not None:
+                definitions[node['id']] = node
     if any(r['source_sha256'] != file_hash(r['source']) for r in results):
         raise ValueError('Input pixels changed since independent detection')
     fps = parse_fps(reference.get('fps') if fps is _DEFAULT_FPS else fps)
@@ -101,6 +108,7 @@ def propagate(results, reference, output, fps=_DEFAULT_FPS, method='flow', confi
     model = results[0]['color_model']
     frames = deepcopy(previous_report['frames']) if partial else [None]*len(results)
     tracker, grays = None, {}
+    deleted_until_observed = set()
     offsets = [r.get('frame_offset', r['frame']) for r in results]
     if any(b <= a for a, b in zip(offsets, offsets[1:])):
         raise ValueError('Frame times must increase strictly')
@@ -119,14 +127,28 @@ def propagate(results, reference, output, fps=_DEFAULT_FPS, method='flow', confi
             unclaimed = []
         else:
             nodes, unclaimed = tracker.step(gray, result['candidate_nodes'], dt=step_dt)
+        if result['frame'] in edits:
+            nodes = tracker.constrain(edits[result['frame']], gray, nodes)
+        for key, value in edits.get(index, {}).items():
+            if value is None:
+                deleted_until_observed.add(key)
+            else:
+                deleted_until_observed.discard(key)
+        deleted_until_observed -= {n['id'] for n in nodes if n.get('measured_xy') is not None}
+        nodes = [n for n in nodes if n['id'] not in deleted_until_observed]
         if begin:
             for node in nodes:
                 node['last_observed_frame'] += begin
         curves, ignored = fit_labeled_curves(nodes, result['image_size'], result['width'])
         frame = dict(frame=result['frame'], source=result['source'], image_size=result['image_size'],
+                     original_source=result.get('original_source', result['source']),
+                     rotation_degrees=result.get('rotation_degrees', 0.),
                      width=result['width'],
                      detection_issues=result.get('detection_issues', []),
-                     human_verified=result['frame'] in anchors,
+                     human_verified=(result['frame'] in anchors and
+                                     anchors[result['frame']].get('verification_scope', 'frame') == 'frame'),
+                     human_edited_ids=[key for key, value in edits.get(index, {}).items() if value is not None],
+                     deleted_node_ids=[key for key, value in edits.get(index, {}).items() if value is None],
                      frame_offset=offsets[index], time=offsets[index]*dt, nodes=nodes, unclaimed_detections=unclaimed,
                      candidate_tracks=tracker.candidate_states(), candidate_events=list(tracker.candidate_events),
                      curves=curves, ignored_curves=ignored,
@@ -146,6 +168,8 @@ def propagate(results, reference, output, fps=_DEFAULT_FPS, method='flow', confi
         reverse = NodeTracker(visible, grays[right], results[right]['width'], spacing, dt, config)
         for index in range(right-1, max(left, first-1), -1):
             backward, _ = reverse.step(grays[index], results[index]['candidate_nodes'], dt=(offsets[index+1]-offsets[index])*dt)
+            if index in edits:
+                backward = reverse.constrain(edits[index], grays[index], backward)
             for node in backward:
                 if node.get('velocity') is not None:
                     node['velocity'] = (-np.array(node['velocity'])).tolist()
@@ -206,6 +230,7 @@ def main(argv=None):
     parser.add_argument('--prepare-only', action='store_true', help='Detect/cache frames without opening the editor')
     parser.add_argument('--reference', type=Path, help='Reuse a previously human-approved reference')
     parser.add_argument('--backend', default='TkAgg', help='Interactive Matplotlib backend')
+    parser.add_argument('--rotation', type=float, help='Explicit counterclockwise correction in degrees; zero disables rotation')
     args = parser.parse_args(argv)
     if args.folder is not None and args.input is not None:
         parser.error('Specify the folder once, either positionally or with --input')
@@ -218,13 +243,18 @@ def main(argv=None):
     print(f'{len(files)} frames; {gaps} missing numbered frames; output: {args.output.resolve()}', flush=True)
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
+    from rotation import prepare_frames
+    reference_path = args.reference or args.output/'reference.json'
+    original_files = files
+    files = prepare_frames(files, args.output, angle=args.rotation, interactive=not args.prepare_only,
+                           backend=args.backend, reference=reference_path)
+    rotation = json.loads((args.output/'rotation.json').read_text())
     from reference_editor import ReferenceEditor, configure_backend
     signature = detection_signature()
     results, futures, errors = {}, {}, []
-    manifest = dict(sources=[str(p) for p in files], workers=args.workers, threads_per_worker=1,
+    manifest = dict(sources=[str(p) for p in files], original_sources=[str(p) for p in original_files], rotation_degrees=rotation['angle'], workers=args.workers, threads_per_worker=1,
                     detection_sha256=signature, results=[], errors=errors)
     manifest_path = args.output/'detections.json'
-    reference_path = args.reference or args.output/'reference.json'
     manifest_written = False
 
     def collect():
@@ -238,7 +268,8 @@ def main(argv=None):
             changed = True
             try:
                 result = future.result()
-                result.update(source_sha256=file_hash(files[index]), detection_sha256=signature, frame_offset=offsets[index])
+                result.update(source_sha256=file_hash(files[index]), detection_sha256=signature, frame_offset=offsets[index],
+                              original_source=str(original_files[index]), rotation_degrees=rotation['angle'])
                 write_json(args.output/f'frame_{index:02d}'/'result.json', result)
                 results[index] = result
                 print(f'Detection ready: frame {index}, {len(result["final_nodes"])} nodes', flush=True)
@@ -261,6 +292,7 @@ def main(argv=None):
                     and cached.get('frame') == i and not cached.get('fit_curves', True)
                     and cached.get('diagnostics', True) == args.diagnostics):
                 cached['frame_offset'] = offsets[i]
+                cached.update(original_source=str(original_files[i]), rotation_degrees=rotation['angle'])
                 results[i] = cached
             else:
                 futures[i] = pool.submit(analyze, (i, str(source), str(args.output)), args.diagnostics)
@@ -278,7 +310,7 @@ def main(argv=None):
                 plt.rcParams.update({'text.usetex': False, 'font.family': 'DejaVu Sans'})
                 def poll_editor():
                     collect()
-                    editor.fig.suptitle(f'First-frame verification | {len(results)}/{len(files)} detections complete | {len(errors)} errors')
+                    editor.fig.suptitle(f'First-frame setup | {len(results)}/{len(files)} detections complete | {len(errors)} errors')
                     editor.fig.canvas.draw_idle()
                     return True
                 from review_session import export_detections, export_detection_video
@@ -292,10 +324,10 @@ def main(argv=None):
                                          output=args.output, keep_open=True, on_export=export_initial,
                                          on_export_video=export_initial_video)
                 figure = editor.fig
-                print('First-frame editor ready. Approve and track to continue; closing only saves a draft.', flush=True)
+                print('First-frame editor ready. Edits are human references immediately; Start tracking begins propagation.', flush=True)
                 approval = editor.show()
                 if approval is None:
-                    print('Editor closed without approval. Detections will finish; no temporal propagation.', flush=True)
+                    print('Editor closed. Edits were saved; detections will finish without starting propagation.', flush=True)
         while futures:
             collect()
             if figure is not None:
@@ -331,7 +363,7 @@ def main(argv=None):
                 return
         show_review(session.report, backend=args.backend, session=session, figure=figure)
     elif not args.prepare_only:
-        raise SystemExit('First-frame approval is still required. Rerun to reopen the editor; cached detections are reused.')
+        raise SystemExit('Tracking has not started. Rerun to resume first-frame setup; cached detections and edits are reused.')
 
 
 if __name__ == '__main__':

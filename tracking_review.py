@@ -7,7 +7,8 @@ from fit_bezier_curves import bezier_basis, node_available, grid_crossings
 from mesh_hints import missing_crossings
 
 from node_editor import NODE_COLORS, NodeEditor, node_marker
-from session_data import node_geometry, load_ui_state, parse_fps, save_reference
+from session_data import node_geometry, load_ui_state, parse_fps
+from message_panel import MessagePanel
 
 COLORS = NODE_COLORS
 
@@ -97,8 +98,9 @@ class TrackingReview:
         self.ax = self.fig.subplots()
         self.fig.canvas.manager.set_window_title('GridTracker — edit and review frames')
         self.fig.subplots_adjust(left=.04, bottom=.24, right=.79, top=.90)
-        self.info = self.fig.text(.025, .025, 'Select a node to inspect it. Click Help for controls and explanations.', fontsize=9, color='#222222')
-        self.message = self.fig.text(.30, .095, '', fontsize=9, color='#222222')
+        self.messages = MessagePanel(self.fig, [.025, .005, .75, .075])
+        self.info, self.message = self.messages.channel('info'), self.messages.channel('message')
+        self.info.set_text('Select a guide node to inspect it. Status text can be selected and copied.')
         self.slider = Slider(self.fig.add_axes([.12, .17, .62, .03]), 'Frame', 0,
                              max(1, len(report['frames'])-1), valinit=saved_ui['frame'], valstep=1)
         self.fps_box = TextBox(self.fig.add_axes([.13, .085, .10, .035]), 'Frames / second ',
@@ -120,10 +122,9 @@ class TrackingReview:
         for widget in (self.slider.label, self.slider.valtext):
             widget.set_color('#222222')
         self.buttons = {}
-        for name, y, callback in (('Help', .355, self.toggle_help), ('Confirm frame', .305, self.confirm),
-                                  ('Reanalyze', .255, self.reanalyze), ('Reanalyze next 10', .205, self.reanalyze_next),
+        for name, y, callback in (('Help', .355, self.toggle_help), ('Reanalyze', .255, self.reanalyze), ('Reanalyze next 10', .205, self.reanalyze_next),
                                   ('Export CSV', .155, self.export), ('Export MP4', .105, self.export_video),
-                                  ('Calibrate length', .055, self.calibrate), ('Unmark frame', .005, self.unmark)):
+                                  ('Calibrate length', .055, self.calibrate), ('Reset edits', .005, self.unmark)):
             button = Button(self.fig.add_axes([.825, y, .16, .04]), name)
             if name == 'Reanalyze':
                 button.label.set_text('Reanalyze all')
@@ -142,8 +143,8 @@ class TrackingReview:
     def report(self):
         return self.session.report if self.session is not None else self._report
 
-    def say(self, text):
-        self.message.set_text(text)
+    def say(self, text, path=None):
+        self.messages.set(text, path=path)
         self.fig.canvas.draw_idle()
 
     def detach_editor(self):
@@ -172,8 +173,9 @@ class TrackingReview:
                                      self.fig, self.ax, self.fps_box,
                                      nodes=self.report['frames'][index]['nodes'], roster=roster,
                                      next_id=max([n['id'] for n in roster]+[0])+1, fps=self.session.fps,
-                                     frame=index, output=self.session.output, review=True, restore_fps=restore_fps)
+                                     frame=index, output=self.session.output, review=True, restore_fps=restore_fps, on_edit=self.edited)
             self.editor.on_redraw = self.refresh
+            self.editor.commit_edits()
             self.apply_options()
         else:
             plot_frame(self.ax, self.report['frames'][index], **{k: self.state[k] for k in tuple(self.OPTIONS.values())})
@@ -211,11 +213,11 @@ class TrackingReview:
                 self.curve_artists += self.ax.plot(points[:, 0], points[:, 1], color='magenta' if curve['family'] == 'vertical' else 'cyan', lw=.8, alpha=.7)
         if self.state['crossings']:
             self.curve_artists += plot_crossings(self.ax, self.preview_crossings, self.state['labels'])
-        confirmed = editor.frame in self.session.anchors
-        title = 'UNCONFIRMED EDITS (autosaved)' if editor.modified else 'HUMAN CONFIRMED' if confirmed else 'Needs review'
+        confirmed = editor.frame in self.session.anchors or editor.frame in self.session.edits
+        title = f"{sum(bool(n.get('human_edited')) for n in editor.nodes)} human-edited nodes" if confirmed else 'Automatic tracking'
         self.ax.set_title(self.ax.get_title()+' | '+title, color='#222222')
-        count = len(self.session.anchors)
-        self.fig.suptitle(f'{count}/{len(self.report["frames"])} frames confirmed'
+        count = len(set(self.session.anchors) | set(self.session.edits))
+        self.fig.suptitle(f'{count}/{len(self.report["frames"])} frames with human references'
                           +(' | Corrections need reanalysis' if self.session.dirty else ''), color='#222222')
         if editor.selected is not None and self.state['guides']:
             node = editor.nodes[editor.selected]
@@ -224,9 +226,9 @@ class TrackingReview:
                                f"Velocity ({self.report['velocity_unit']}): {node.get('velocity')} | acceleration ({self.report['acceleration_unit']}): {node.get('acceleration')}")
         else:
             self.state['selected'] = None
-            self.info.set_text('Drafts autosave; Confirm frame fixes a human reference.' if self.state['guides'] else
+            self.info.set_text('Moved and added nodes are human references. Held/missing positions update automatically.' if self.state['guides'] else
                                'Enable Guide nodes to edit. Grid crossings show the fitted intersections used for export.')
-        for name, enabled in (('Export CSV', True), ('Unmark frame', editor.frame != 0 and confirmed)):
+        for name, enabled in (('Export CSV', True), ('Reset edits', editor.frame != 0 and confirmed)):
             self.buttons[name].active = enabled
             self.buttons[name].label.set_color('#222222' if enabled else 'gray')
 
@@ -249,32 +251,18 @@ class TrackingReview:
         if self.editor is not None:
             self.editor.active = not self.help.visible
 
-    def advance(self):
-        index = self.state['frame']
-        remaining = sorted(set(range(len(self.report['frames'])))-self.session.anchors.keys())
-        if remaining:
-            self.slider.set_val(next((i for i in remaining if i > index), remaining[0]))
-        self.draw()
-
-    def confirm(self, event=None):
-        if self.session is None or self.mode != 'review':
-            return
-        index = self.state['frame']
-        nodes = [n for n in self.editor.nodes if node_available(n)]
+    def edited(self, editor, before, nodes):
         try:
             fps = parse_fps(self.fps_box.text)
-            self.session.validate_edit(index, nodes)
-            document = save_reference(self.session.output/'reviews'/f'frame_{index:02d}.json', self.session.results[index], nodes, True, fps)
-            self.session.confirm(index, document)
+        except ValueError:
+            fps = self.session.fps  # Incomplete time text must not block node edits or undo.
+        try:
+            nodes = self.session.apply_edit(editor.frame, before, nodes, fps=fps)
         except ValueError as error:
-            self.say(str(error))
-            return
-        save_reference(self.editor.draft_path, self.session.results[index], document['nodes'], False, fps,
-                       editor_state=dict(modified=False, fps_text=self.fps_box.text))
-        self.editor.dispose()
-        self.editor = None
-        self.say(f'Frame {index} confirmed. Reanalyze to propagate corrections.')
-        self.advance()
+            self.say(f'Edit could not be applied: {error}')
+            return before
+        self.say('Human edit saved. Later held/missing nodes were updated; observations were kept.')
+        return nodes
 
     def reanalyze_next(self, event=None):
         first = self.state['frame']+1
@@ -294,7 +282,7 @@ class TrackingReview:
             return
         self.detach_editor()
         self.session.fps = fps
-        self.say('Reanalyzing unconfirmed frames from fixed human anchors…')
+        self.say('Reanalyzing with fixed human-edited nodes…')
         self.mode = 'processing'
         def progress(done, total):
             if done % 10 == 0 or done == total:
@@ -310,7 +298,7 @@ class TrackingReview:
         finally:
             self.mode = 'review'
             self.draw()
-        self.say('Reanalysis complete. Confirmed coordinates stay fixed.' if frame_range is None else
+        self.say('Reanalysis complete. Human-edited coordinates stay fixed.' if frame_range is None else
                  f'Reanalyzed frames {frame_range[0]}–{frame_range[1]}; all other frames unchanged.')
 
     def unmark(self, event=None):
@@ -326,7 +314,7 @@ class TrackingReview:
             return
         if changed:
             self.reanalyze()
-            self.say(f'Frame {index} is automatic again; former edits are in reviews/history.')
+            self.say(f'Frame {index} edits reset; previous edits are in reviews/history.')
         else:
             self.draw()
 
@@ -339,7 +327,7 @@ class TrackingReview:
         except ValueError as error:
             self.say(str(error))
             return
-        self.say(f'Exported fitted crossings, curves, and candidates to {paths[0].parent}')
+        self.say(f'Exported fitted crossings, curves, and candidates to {paths[0].parent}', path=paths[0].parent)
 
     def export_video(self, event=None):
         from plot_widgets import paused_widgets
@@ -362,7 +350,7 @@ class TrackingReview:
         finally:
             self.mode = 'review'
             self.apply_options()
-        self.say(f'Exported {path.name} (30 fps playback) to {path.parent}')
+        self.say(f'Exported {path.name} (30 fps playback) to {path.parent}', path=path.parent)
 
     def calibrate(self, event=None):
         if self.session is None or self.mode != 'review':
@@ -372,8 +360,10 @@ class TrackingReview:
         self.editor.active = False
         self.fps_box.stop_typing()
         self.mode = 'calibration'
+        self.messages.set_visible(False)
         def done(document):
             self.mode, self.calibration_panel = 'review', None
+            self.messages.set_visible(True)
             self.editor.active = not self.help.visible
             self.session.calibration = load_calibration(self.session.output)
             self.session.save()

@@ -45,29 +45,24 @@ class MouseEventTests(unittest.TestCase):
         self.viewer = TrackingReview(self.session.report, self.session)
         self.viewer.slider.set_val(1)
 
-    def test_nodes_are_editable_and_confirmable_without_a_mode_switch(self):
+    def test_moved_nodes_become_human_references_without_a_confirm_button(self):
         viewer = self.viewer
-        self.assertNotIn('Edit nodes', viewer.buttons)
+        self.assertNotIn('Confirm frame', viewer.buttons)
         self.assertTrue(viewer.slider.ax.get_visible())
-        self.assertTrue(viewer.legend.axes.get_visible())
         editor = viewer.editor
         before = editor.nodes[0]['x']
+        key = editor.nodes[0]['id']
         x, y = viewer.ax.transData.transform([before, editor.nodes[0]['y']])
         for name, px in (('button_press_event', x), ('motion_notify_event', x+8), ('button_release_event', x+8)):
             event = MouseEvent(name, viewer.fig.canvas, px, y, button=1)
             viewer.fig.canvas.callbacks.process(name, event)
         self.assertGreater(editor.nodes[0]['x'], before)
-        changed = editor.nodes[0]['x']
+        self.assertEqual(self.session.edits[1][key]['x'], editor.nodes[0]['x'])
+        self.assertTrue(self.session.edits[1][key]['human_edited'])
+        self.assertEqual(set(self.session.edits[1]), {key})
         self.assertNotIn(1, self.session.anchors)
-        click(viewer.fig, viewer.buttons['Confirm frame'].ax)
-        self.assertIsNone(viewer.fig.canvas.mouse_grabber)
-        self.assertIn(1, self.session.anchors)
-        self.assertAlmostEqual(self.session.anchors[1]['nodes'][0]['x'], changed)
-        self.assertEqual(viewer.mode, 'review')
+        self.assertEqual(viewer.state['frame'], 1)
         self.assertTrue(viewer.editor.active)
-        viewer.slider.set_val(1)
-        self.assertTrue(viewer.editor.active)
-        click(viewer.fig, viewer.buttons['Confirm frame'].ax)
 
     def test_undo_shortcuts_restore_and_autosave_node_edits(self):
         viewer = self.viewer
@@ -76,6 +71,7 @@ class MouseEventTests(unittest.TestCase):
         def key(name):
             viewer.fig.canvas.callbacks.process(
                 'key_press_event', KeyEvent('key_press_event', viewer.fig.canvas, name, x, y))
+        from session_data import node_geometry
         original = [dict(n) for n in editor.nodes]
         for shortcut in ('cmd+z', 'ctrl+z', 'super+z', 'z', 'u'):
             with self.subTest(shortcut=shortcut):
@@ -83,11 +79,11 @@ class MouseEventTests(unittest.TestCase):
                 key('delete')
                 self.assertEqual(len(editor.nodes), len(original)-1)
                 key(shortcut)
-                self.assertEqual(editor.nodes, original)
+                self.assertEqual(node_geometry(editor.nodes), node_geometry(original))
                 from session_data import load_draft
                 saved = load_draft(editor.draft_path, editor.result)
-                self.assertEqual(saved['nodes'], original)
-                self.assertNotIn(1, self.session.anchors)
+                self.assertEqual(saved['nodes'], editor.nodes)
+                self.assertIn(1, self.session.edits)
         editor.selected = 0
         key('delete')
         removed = [dict(n) for n in editor.nodes]
@@ -97,7 +93,7 @@ class MouseEventTests(unittest.TestCase):
         self.assertEqual(editor.nodes, removed)
         editor.fps_box.stop_typing()
         key('z')
-        self.assertEqual(editor.nodes, original)
+        self.assertEqual(node_geometry(editor.nodes), node_geometry(original))
 
     def test_hidden_slider_does_not_grab_clicks_in_calibration(self):
         viewer = self.viewer
@@ -131,7 +127,7 @@ class MouseEventTests(unittest.TestCase):
         checked = viewer.checks.get_status()
         def processing(progress):
             self.assertFalse(viewer.slider.get_active())
-            click(viewer.fig, viewer.buttons['Confirm frame'].ax)
+            click(viewer.fig, viewer.buttons['Export CSV'].ax)
             self.assertEqual(viewer.mode, 'processing')
             self.assertIsNone(viewer.editor)
             raise ValueError('test failure')

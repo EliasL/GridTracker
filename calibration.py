@@ -67,13 +67,16 @@ class UnitDropdown:
 class CalibrationPanel:
     def __init__(self, fig, output, on_done):
         from plot_widgets import Button, TextBox
+        from message_panel import MessagePanel
         self.fig, self.output, self.on_done = fig, Path(output), on_done
         self.old = [(a, a.get_visible()) for a in list(fig.axes)+list(fig.texts)]
         for artist, _ in self.old:
             artist.set_visible(False)
         self.ax = fig.add_axes([.06, .24, .88, .68])
         self.ax.set_axis_off()
-        self.status = fig.text(.05, .19, 'Load a calibration image at the same magnification as the video. Drag endpoints or the whole line.')
+        self.messages = MessagePanel(fig, [.05, .005, .90, .03])
+        self.status = self.messages.channel('message')
+        self.status.set_text('Load a calibration image at the same magnification as the video. Drag endpoints or the whole line.')
         self.length = TextBox(fig.add_axes([.20, .12, .10, .04]), 'Known length ', initial='10')
         self.units = UnitDropdown(fig, [.34, .12, .10, .04])
         self.buttons = []
@@ -186,7 +189,7 @@ class CalibrationPanel:
         for axes in list(self.fig.axes):
             if axes not in old_axes:
                 axes.remove()
-        self.status.remove()
+        self.messages.close()
         for artist, visible in self.old:
             artist.set_visible(visible)
         if not closing:
